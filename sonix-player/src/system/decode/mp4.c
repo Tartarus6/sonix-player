@@ -18,7 +18,14 @@
 #define SIZE_WINDOW 1024   // sample sizes cached at a time
 #define MAX_SMALL_BOX (4 * 1024 * 1024)
 #define MAX_DEPTH 12
-#define MAX_FREEFORM 8
+// How many iTunes "----" freeform atoms to keep. Players that a MusicBrainz
+// Picard-tagged library realistically carries -- MusicBrainz IDs, personnel,
+// acoustid fingerprints and ReplayGain -- routinely exceed a handful, so if
+// this were too small the ReplayGain atoms (not specially prioritised) would
+// land past the cut and silently vanish. 64 comfortably holds any file that
+// actually tags ReplayGain while still being a fixed, statically allocated
+// array (80 bytes each).
+#define MAX_FREEFORM 64
 
 struct chunk_run {
 	uint32_t first_chunk; // 1-based, as the file writes it
@@ -115,9 +122,10 @@ struct mp4_file {
 	uint32_t cover_size;
 	bool cover_png;
 
-	// The iTunes freeform tags worth keeping. Only a handful are ever wanted,
-	// and holding every "----" atom a file might carry would mean an allocator
-	// for something nobody reads.
+	// The iTunes freeform tags worth keeping. Sized to hold everything a
+	// realistically tagged file carries (MusicBrainz/Picard routinely writes
+	// well over a dozen, including the ReplayGain atoms) so none of the wanted
+	// ones is ever cut off. Fixed-size and statically embedded, so no allocator.
 	struct {
 		char name[40];
 		char value[40];
