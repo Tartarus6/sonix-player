@@ -2325,15 +2325,15 @@ static void read_ape_metadata(const char *filepath, song_metadata_t *out) {
 // knowing that streaming exists.
 // ---------------------------------------------------------------------------
 
-static void read_sidecar_tags(const char *filepath, song_metadata_t *out) {
+static bool read_sidecar_tags(const char *filepath, song_metadata_t *out) {
 	char path[600];
 	if ((size_t)snprintf(path, sizeof(path), "%.560s.tags", filepath) >= sizeof(path)) {
-		return;
+		return false;
 	}
 
 	FILE *f = fopen(path, "r");
 	if (!f) {
-		return;
+		return false;
 	}
 
 	char line[512];
@@ -2374,6 +2374,7 @@ static void read_sidecar_tags(const char *filepath, song_metadata_t *out) {
 		}
 	}
 	fclose(f);
+	return true;
 }
 
 // One track of a CUE sheet: the tags are in the sheet, not in the audio file.
@@ -2546,6 +2547,15 @@ void metadata_read(const char *filepath, song_metadata_t *out) {
 
 	read_sidecar_tags(filepath, out);
 	clean_fields(out);
+}
+
+bool metadata_read_sidecar(const char *filepath, song_metadata_t *out) {
+	memset(out, 0, sizeof(*out));
+	if (!filepath || !read_sidecar_tags(filepath, out)) {
+		return false;
+	}
+	clean_fields(out);
+	return true;
 }
 
 char *metadata_read_lyrics(const char *filepath) {
