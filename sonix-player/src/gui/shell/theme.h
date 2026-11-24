@@ -81,6 +81,26 @@ void theme_set_accent(int index);
 // Picks a specific theme rather than flipping; no-op when already active.
 void theme_set_dark(bool dark);
 
+// ---------------------------------------------------------------------------
+// Home screen layout theme (Classic vs. Pod)
+//
+// HOME_THEME_CLASSIC — the existing tile-based home screen (the default).
+// HOME_THEME_POD     — the iPod Touch-style 3×3 grid + dock home screen.
+//
+// home_theme_get() reads [ui] home_theme from the config; returns
+// HOME_THEME_CLASSIC when the key is absent or its value is out of range.
+// home_theme_set() writes the key and calls config_save().  Screen navigation
+// (lv_scr_load_anim) is wired separately in gui.c once both screens exist.
+// ---------------------------------------------------------------------------
+
+typedef enum {
+	HOME_THEME_CLASSIC = 0,
+	HOME_THEME_POD     = 1,
+} home_theme_t;
+
+home_theme_t home_theme_get(void);
+void         home_theme_set(home_theme_t theme);
+
 // The dynamic tint (Appearance > Dynamic tint): the neutral colours --
 // backgrounds, cards, the status bar -- borrow the accent's hue, the way
 // Material You colours a system from one seed. Each colour keeps its brightest

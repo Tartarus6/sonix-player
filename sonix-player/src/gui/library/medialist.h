@@ -81,6 +81,15 @@ void medialist_set_show_artist(bool on, int lists);
 // by name or by date, which way round, and an artist's tracks grouped by
 // record or not. What SonixLink follows, so a list on the phone reads in the
 // same order and a track tapped there gets the same queue as here.
+// The sort button of the ordinary lists, for a page that shows one of the
+// flat lists itself (the Pixel library): the same menu (or the same A-Z / Z-A
+// flip on a list that has no dates), saved the same way, and `changed` called
+// once the order has been changed. The icon is the one that list's own button
+// would wear now.
+void medialist_sort_menu(lv_obj_t *anchor, library_list_t kind, void (*changed)(void));
+const lv_image_dsc_t *medialist_sort_icon(library_list_t kind);
+// Whether that list has an order to choose at all.
+bool medialist_sortable(library_list_t kind);
 void medialist_list_order(library_list_t kind, library_filter_t filter, library_order_t *order, bool *desc);
 
 // The same choices as bits, for the phone to order its own lists by: bit

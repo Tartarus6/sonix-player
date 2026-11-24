@@ -156,6 +156,7 @@ static void save(void) {
 
 static void load(void) {
 	subs_count = 0;
+	bool migrated = false;
 	sqlite3 *db = open_db();
 	if (!db) {
 		return;
@@ -178,6 +179,26 @@ static void load(void) {
 			snprintf(feed.image, sizeof(feed.image), "%s", image ? image : "");
 			snprintf(feed.url, sizeof(feed.url), "%s", url ? url : "");
 			feed.episode_count = sqlite3_column_int(stmt, 5);
+			// Followed while the catalogue was Podcast Index: that number can no
+			// longer be looked up, but with its feed address the podcast is the
+			// same one under the id the iTunes catalogue gives it now
+			// (podcast.h). Without an address it stays as it was, and opening
+			// it says it is gone.
+			if (!podcastrss_is_id(feed.id) && feed.url[0]) {
+				long long moved = podcastrss_feed_id(feed.url);
+				bool dup = false;
+				for (int k = 0; k < subs_count && !dup; k++) {
+					dup = subs[k].id == moved;
+				}
+				migrated = true;
+				if (dup) {
+					continue; // already followed under the new id
+				}
+				feed.id = moved;
+			} else if (!podcastrss_is_id(feed.id)) {
+				printf("podcastsubs: \"%s\" was followed by its Podcast Index id with no feed address; "
+					   "it cannot be opened any more\n", feed.title);
+			}
 			// A podcast read from its feed is found again by this address.
 			podcastrss_remember(feed.id, feed.url);
 			subs[subs_count++] = feed;
@@ -185,6 +206,11 @@ static void load(void) {
 		sqlite3_finalize(stmt);
 	}
 	sqlite3_close(db);
+	if (migrated) {
+		printf("podcastsubs: moved the followed podcasts from Podcast Index ids to feed ids\n");
+		save(); // rewrites the table, and reads the file identity again
+		return;
+	}
 	file_identity_read(db_path, &db_identity);
 }
 

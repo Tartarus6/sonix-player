@@ -1,5 +1,6 @@
 #include "musicsettings.h"
 #include "musictiles.h"
+#include "src/gui/library/music.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -1441,6 +1442,7 @@ static void cover_accent_cb(lv_event_t *e) {
 static lv_obj_t *layout_standard_pill;
 static lv_obj_t *layout_alternative_pill;
 static lv_obj_t *layout_studio_pill;
+static lv_obj_t *layout_pixel_pill;
 
 static void layout_refresh(void) {
 	if (!layout_standard_pill) {
@@ -1450,6 +1452,7 @@ static void layout_refresh(void) {
 	settingsrow_pill_active(layout_standard_pill, chosen == PLAYER_LAYOUT_STANDARD);
 	settingsrow_pill_active(layout_alternative_pill, chosen == PLAYER_LAYOUT_ALTERNATIVE);
 	settingsrow_pill_active(layout_studio_pill, chosen == PLAYER_LAYOUT_STUDIO);
+	settingsrow_pill_active(layout_pixel_pill, chosen == PLAYER_LAYOUT_PIXEL);
 }
 
 static void layout_pick_cb(lv_event_t *e) {
@@ -1473,6 +1476,13 @@ static void allow_delete_cb(lv_event_t *e) {
 	medialist_set_allow_delete(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
 }
 
+static lv_obj_t *pixel_library_switch;
+
+static void pixel_library_cb(lv_event_t *e) {
+	(void)e;
+	music_set_pixel_page(lv_obj_has_state(pixel_library_switch, LV_STATE_CHECKED));
+}
+
 static void build_library_page(gui_config_t *cfg) {
 	library_screen = lv_obj_create(NULL);
 	lv_obj_t *container = settingsrow_page(library_screen, cfg, "musicsettings_library");
@@ -1481,6 +1491,13 @@ static void build_library_page(gui_config_t *cfg) {
 	// Which tiles the Music page shows, and in what order.
 	musictiles_init(cfg);
 	settingsrow_add(container, "musicsettings_rearrange_main_page", NULL, switch_screen_cb, musictiles_screen);
+	// The Pixel look of the Music page: a heading, tabs and cards in place of
+	// the tiles. The tabs are the tiles arranged on the row above.
+	settingsrow_toggle(container, "musicsettings_pixel_library", &pixel_library_switch, pixel_library_cb);
+	option_note(container, "musicsettings_pixel_library_note");
+	if (music_pixel_page()) {
+		lv_obj_add_state(pixel_library_switch, LV_STATE_CHECKED);
+	}
 
 	// The album carousel. Off by default: it is a second way into the records,
 	// not a replacement for the list, and the covers it draws are decoded at a
@@ -1570,6 +1587,8 @@ static void build_nowplaying_page(gui_config_t *cfg) {
 		settingsrow_pill(layout_pills, "musicsettings_layout_alternative", PLAYER_LAYOUT_ALTERNATIVE, layout_pick_cb);
 	layout_studio_pill =
 		settingsrow_pill(layout_pills, "musicsettings_layout_studio", PLAYER_LAYOUT_STUDIO, layout_pick_cb);
+	layout_pixel_pill =
+		settingsrow_pill(layout_pills, "musicsettings_layout_pixel", PLAYER_LAYOUT_PIXEL, layout_pick_cb);
 
 	layout_refresh();
 	theme_register_refresh(layout_refresh);

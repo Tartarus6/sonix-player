@@ -23,10 +23,6 @@
 //     client_id = ...
 //     client_secret = ...
 //
-//     [podcast]
-//     api_key = ...
-//     api_secret = ...
-//
 //     [lastfm]
 //     api_key = ...
 //     api_secret = ...
@@ -62,12 +58,8 @@ const char *streamkeys_qobuz_app_id(void);
 const char *streamkeys_qobuz_app_secret(void);
 const char *streamkeys_tidal_client_id(void);
 const char *streamkeys_tidal_client_secret(void);
-// Podcast Index. This pair identifies this player rather than a HiBy
-// application: it is requested free on podcastindex.org, and each request is
-// signed with the SHA-1 of key + secret + time. Same rule as the other two:
-// out of the source, in a file whoever assembles the firmware fills in.
-const char *streamkeys_podcast_key(void);
-const char *streamkeys_podcast_secret(void);
+// Podcasts need no keys: the catalogue is Apple's free iTunes Search API. A
+// [podcast] section left in an older file is ignored.
 // Last.fm. An API account of this player, requested on last.fm/api: it signs
 // every call with the MD5 of the sorted parameters plus the secret.
 const char *streamkeys_lastfm_key(void);

@@ -21,6 +21,9 @@
 #include "src/gui/shell/confirm.h"
 #include "src/gui/shell/corners.h"
 #include "src/gui/settings/bootlogopage.h"
+#include "src/gui/settings/podmenu.h"
+#include "src/gui/shell/pod_home.h"
+#include "src/gui/shell/pod_layout.h"
 #include "src/gui/settings/kblayoutpage.h"
 #include "src/gui/settings/screensaver.h"
 #include "src/gui/library/audiobookextras.h"
@@ -37,6 +40,7 @@
 #include "src/gui/wireless/sonixlink.h"
 #include "src/gui/gearboy/gearboypage.h"
 #include "src/gui/gearboy/gearboysettings.h"
+#include "src/gui/crossyroad/crossyroad.h"
 #include "src/gui/flappybird/flappybird.h"
 #include "src/gui/gearboy/gearboyplay.h"
 #include "src/gui/shell/lowbattery.h"
@@ -63,6 +67,7 @@
 #include "src/gui/bluetooth/btreceiverpage.h"
 #include "src/gui/audio/dacpage.h"
 #include "src/gui/audio/metronomepage.h"
+#include "src/gui/calculator/calculatorpage.h"
 #include "src/system/bluetooth/btreceiver.h"
 #include "src/system/audio/usbdac.h"
 #include "src/system/net/wifitransfer.h"
@@ -635,7 +640,9 @@ void gui_init(gui_config_t *cfg) {
 	gearboypage_screen = lv_obj_create(NULL);
 	gearboyplay_screen = lv_obj_create(NULL);
 	flappybird_screen = lv_obj_create(NULL);
+	crossyroad_screen = lv_obj_create(NULL);
 	metronomepage_screen = lv_obj_create(NULL);
+	calculatorpage_screen = lv_obj_create(NULL);
 
 	// Persistent topbar that stays above every screen.
 	topbar_init(cfg);
@@ -654,6 +661,10 @@ void gui_init(gui_config_t *cfg) {
 	corners_init(cfg);
 
 	main_menu_init(cfg);
+	// The Pod home theme: a layer over the Classic tiles on the same screen,
+	// shown only while Settings > Appearance has Pod selected.
+	pod_layout_init();
+	pod_home_create(main_menu_screen, cfg);
 
 	music_init(cfg);
 	coverflow_init(cfg);
@@ -682,7 +693,9 @@ void gui_init(gui_config_t *cfg) {
 	gearboysettings_init(cfg); // before the page: its gear opens this
 	gearboypage_init(cfg);
 	flappybird_init(cfg);
+	crossyroad_init(cfg);
 	metronomepage_init(cfg);
+	calculatorpage_init(cfg);
 	// before morepage: the books tile opens the shelf, and the shelf opens the
 	// reader.
 	ebookreader_init(cfg);
@@ -712,6 +725,7 @@ void gui_init(gui_config_t *cfg) {
 	// after devoptions: the system entry opens the page that can unlock it
 	systempage_init(cfg);
 	bootlogopage_init(cfg); // before appearance: its row carries the screen
+	podmenu_init(cfg);		// the Pod layout editor the appearance page opens
 	appearance_init(cfg);
 	language_init(cfg);
 	libraryscan_init(cfg);
@@ -763,6 +777,7 @@ void gui_init(gui_config_t *cfg) {
 		btsettings_screen, btaudio_screen,	 airpodspage_screen, airplay_screen,   streaming_screen,
 		radiopage_screen,  radiolist_screen, radiosearch_screen,
 		dlna_screen,	   sonixlink_screen,	 morepage_screen,	  gearboypage_screen, metronomepage_screen,
+		calculatorpage_screen,
 	};
 	for (size_t i = 0; i < sizeof(back_swipe_screens) / sizeof(back_swipe_screens[0]); i++) {
 		switcher_attach_back_gesture(back_swipe_screens[i]);

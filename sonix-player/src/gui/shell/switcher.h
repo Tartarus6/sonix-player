@@ -76,6 +76,10 @@ void back_btn_sync_visibility(void);
 // does not belong to LVGL -- Gearboy while a game runs: the arrow would only be
 // drawn, since the screen belongs to the emulator at that moment.
 void back_btn_force_hidden(bool hidden);
+// Hides the chevron over the player only, for an arrangement of the player
+// that brings its own way out (the Pixel one's round button). Elsewhere the
+// chevron is untouched.
+void back_btn_hidden_in_player(bool hidden);
 
 // Hides the chevron while `screen` is the page on screen, for a page that puts
 // up a full-screen dialog with its own close button: two ways out drawn side by

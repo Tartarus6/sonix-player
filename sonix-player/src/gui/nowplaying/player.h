@@ -4,6 +4,7 @@
 #include "src/gui/nowplaying/cover.h"
 #include "src/gui/shell/gui.h"
 #include "src/system/library/library.h"
+#include "src/system/library/lyrics.h"
 #include "src/system/streaming/podcast.h" // podcast_feed_t
 
 #include "lvgl/lvgl.h"
@@ -58,6 +59,7 @@ typedef enum {
 	PLAYER_LAYOUT_STANDARD = 0,
 	PLAYER_LAYOUT_ALTERNATIVE = 1,
 	PLAYER_LAYOUT_STUDIO = 2,
+	PLAYER_LAYOUT_PIXEL = 3, // pixelplayer.h: everything in the sleeve's colours
 } player_layout_t;
 
 player_layout_t player_layout_get(void);
@@ -159,5 +161,51 @@ bool player_cover_copy(int size, cover_image_t *out, uint64_t *id);
 void player_set_statusbar_always(bool on);
 bool player_statusbar_always(void);
 
+
+// What the Pixel arrangement (pixelplayer.h) borrows from the player, so it
+// does exactly what the ordinary buttons do.
+//
+// Whether the thing playing is starred, by the same rules the star uses (a
+// station, a podcast, a Qobuz or Tidal track, a file), and the star's own tap.
+bool player_current_is_favourite(void);
+void player_toggle_favourite(void);
+// Tells the player the playback mode was changed from outside it, so its own
+// button follows.
+void player_mode_changed(void);
+// The lyrics of the file playing, once they have been read: NULL before then,
+// and for anything that is not a file on the card. Borrowed until the next
+// track change.
+const lyrics_t *player_current_lyrics(void);
+// Looks the playing track up on LRCLIB and opens the list to pick from, the
+// same as the swipe on a track with no words: asks to turn Wi-Fi on first when
+// it is off.
+void player_lyrics_search(void);
+// The player's three-dot menu, opened from `anchor`: the track's options, or a
+// book's chapters and bookmarks, or a podcast's episodes, as the standard
+// arrangement offers them.
+void player_open_more_menu(lv_obj_t *anchor);
+
+// What kind of thing is playing, as the player dresses itself for it: music,
+// an audiobook, or a podcast episode.
+typedef enum {
+	PLAYER_KIND_MUSIC,
+	PLAYER_KIND_BOOK,
+	PLAYER_KIND_PODCAST,
+} player_kind_t;
+player_kind_t player_kind(void);
+// The pictures on the player's previous and next buttons now: the track
+// skips for music, the second jumps (10, 30 or 60) set for books or podcasts.
+void player_skip_icons(const lv_image_dsc_t **prev, const lv_image_dsc_t **next);
+// The playback speed of the book or episode playing, in thousandths (1000 is
+// normal), and the player's own menu to change it, opened from `anchor`.
+int player_speed_permille(void);
+void player_open_speed_menu(lv_obj_t *anchor);
+// A book's own actions, as its menu offers them.
+bool player_book_has_chapters(void);
+void player_book_chapters(void);
+void player_book_add_bookmark(void);
+// The sleeve's colour as 0xRRGGBB, as worked out for its album's page; false
+// with no cover up.
+bool player_cover_tone(uint32_t *tone);
 
 #endif

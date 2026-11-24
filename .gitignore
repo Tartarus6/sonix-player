@@ -19,6 +19,9 @@ streaming-keys.bin
 
 sonix-player/audio-target
 
+sonix-player/usr/
+sonix-player/scan_folders.txt
+
 sonix-player/compile_commands.json
 sonix-player/rockbox-toolchain
 
