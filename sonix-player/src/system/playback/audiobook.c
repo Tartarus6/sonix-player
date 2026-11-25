@@ -66,6 +66,89 @@ static void clear_locked(void) {
 	current_book[0] = '\0';
 }
 
+// ---------------------------------------------------------------------------
+// A chapter's own length, written into its name
+// ---------------------------------------------------------------------------
+//
+// Some tools that cut a book into chapters write the length into the name --
+// "Chapter 2 - 23:41". When the chapter list shows chapters (a book with no
+// more than one part), each row gets a clock of its own, so name_chapter()
+// takes the suffix off and the list, the progress row and bookmarks all use
+// that same stripped name.
+//
+// A folder book with more than one part lists parts instead: those rows have
+// no clock, and the chapters inside the part files are never listed at all.
+// Their names keep the suffix so it still shows in the progress row and in
+// bookmarks. add_part() keeps it on part titles for the same reason.
+//
+// Only a trailing " - M:SS" or " - H:MM:SS" (a dash with spaces around it, as
+// a person writes it) is removed. Anything else is left exactly as it is: a
+// name with a year or a part number after the dash is not a clock.
+
+static bool clock_suffix(const char *text) {
+	const char *p = text;
+	if (*p < '0' || *p > '9') {
+		return false;
+	}
+	while (*p >= '0' && *p <= '9') {
+		p++;
+	}
+	if (*p++ != ':') {
+		return false;
+	}
+	for (int i = 0; i < 2; i++) {
+		if (p[i] < '0' || p[i] > '9') {
+			return false;
+		}
+	}
+	p += 2;
+	if (*p == ':') {
+		p++;
+		for (int i = 0; i < 2; i++) {
+			if (p[i] < '0' || p[i] > '9') {
+				return false;
+			}
+		}
+		p += 2;
+	}
+	return *p == '\0';
+}
+
+static void strip_trailing_clock(char *text) {
+	if (!text || !text[0]) {
+		return;
+	}
+	size_t len = strlen(text);
+	while (len > 0 && (text[len - 1] == ' ' || text[len - 1] == '\t')) {
+		text[--len] = '\0';
+	}
+
+	char *cut = NULL;
+	char *rest = NULL;
+	for (char *p = text; *p; p++) {
+		if (p[0] != ' ') {
+			continue;
+		}
+		if (p[1] == '-' && p[2] == ' ') {
+			cut = p;
+			rest = p + 3;
+		} else if ((unsigned char)p[1] == 0xE2 && p[2] && (unsigned char)p[2] == 0x80 && p[3] &&
+				   ((unsigned char)p[3] == 0x93 || (unsigned char)p[3] == 0x94) && p[4] == ' ') {
+			// The en and em dashes, in UTF-8, as a word processor writes them.
+			cut = p;
+			rest = p + 5;
+		}
+	}
+	if (!cut || cut == text || !rest || !clock_suffix(rest)) {
+		return;
+	}
+
+	*cut = '\0';
+	while (cut > text && cut[-1] == ' ') {
+		*--cut = '\0';
+	}
+}
+
 // Called with `lock` held, from audiobook_track_changed().
 static bool add_part(const char *path, const char *title, void *user) {
 	(void)user;
@@ -87,16 +170,19 @@ static bool add_part(const char *path, const char *title, void *user) {
 // The title a chapter is stored under. Both sources leave it empty when the
 // file carries no name for it, and a numbered stand-in is better than a blank
 // row; the number is the chapter's place in the book, counted from one.
-static void name_chapter(char *out, size_t size, const char *title, int index) {
+static void name_chapter(char *out, size_t size, const char *title, int index, bool strip_clock) {
 	if (title && title[0]) {
 		snprintf(out, size, "%s", title);
+		if (strip_clock) {
+			strip_trailing_clock(out);
+		}
 		return;
 	}
 	snprintf(out, size, tr("chapter_n"), index + 1);
 }
 
 // The chapters an Opus, Ogg Vorbis or FLAC file keeps in its comments.
-static void load_vorbis_chapters_locked(const char *filepath) {
+static void load_vorbis_chapters_locked(const char *filepath, bool strip_clock) {
 	int count = vorbischap_read(filepath, NULL, 0);
 	if (count <= 0) {
 		return;
@@ -110,7 +196,7 @@ static void load_vorbis_chapters_locked(const char *filepath) {
 	if (chapters) {
 		for (int i = 0; i < count; i++) {
 			chapters[i].start = found[i].start;
-			name_chapter(chapters[i].title, sizeof(chapters[i].title), found[i].title, i);
+			name_chapter(chapters[i].title, sizeof(chapters[i].title), found[i].title, i, strip_clock);
 		}
 		chapter_count = count;
 	}
@@ -121,7 +207,7 @@ static void load_vorbis_chapters_locked(const char *filepath) {
 // held open for its length: an open file handle on the card is what stops the
 // card from being unmounted, and the marks are a few kilobytes that never
 // change.
-static void load_chapters_locked(const char *filepath) {
+static void load_chapters_locked(const char *filepath, bool strip_clock) {
 	mp4_file_t *m = mp4_open(filepath);
 	if (!m) {
 		// Not an MP4. An audiobook is just as often one long .mp3 with ID3v2
@@ -130,7 +216,7 @@ static void load_chapters_locked(const char *filepath) {
 		// marks at all.
 		int count = id3chap_read(filepath, NULL, 0);
 		if (count <= 0) {
-			load_vorbis_chapters_locked(filepath);
+			load_vorbis_chapters_locked(filepath, strip_clock);
 			return;
 		}
 		id3chap_t *found = calloc((size_t)count, sizeof(*found));
@@ -143,7 +229,7 @@ static void load_chapters_locked(const char *filepath) {
 			if (chapters) {
 				for (int i = 0; i < count; i++) {
 					chapters[i].start = found[i].start;
-					name_chapter(chapters[i].title, sizeof(chapters[i].title), found[i].title, i);
+					name_chapter(chapters[i].title, sizeof(chapters[i].title), found[i].title, i, strip_clock);
 				}
 				chapter_count = count;
 			}
@@ -159,7 +245,7 @@ static void load_chapters_locked(const char *filepath) {
 			for (int i = 0; i < count; i++) {
 				const mp4_chapter_t *c = mp4_chapter(m, i);
 				chapters[i].start = c->start;
-				name_chapter(chapters[i].title, sizeof(chapters[i].title), c->title, i);
+				name_chapter(chapters[i].title, sizeof(chapters[i].title), c->title, i, strip_clock);
 			}
 			chapter_count = count;
 		}
@@ -287,7 +373,10 @@ void audiobook_track_changed(const char *filepath) {
 		}
 	}
 
-	load_chapters_locked(filepath);
+	// The chapter list shows parts instead of chapters once a folder book has
+	// more than one part, so only strip a chapter's clock when its row will
+	// actually carry one. Otherwise the suffix is its only visible copy.
+	load_chapters_locked(filepath, part_count <= 1);
 	printf("audiobook: %s (%d chapters, part %d of %d)\n", filepath, chapter_count, part_index + 1, part_count);
 
 	pthread_mutex_unlock(&lock);
