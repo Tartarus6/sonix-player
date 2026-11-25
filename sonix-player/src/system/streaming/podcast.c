@@ -4,28 +4,32 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <time.h>
 
 #include "src/system/core/config.h"
 #include "src/system/net/http.h"
 #include "src/system/core/json.h"
 #include "src/system/core/lang.h"
-#include "src/system/core/sha1.h"
 #include "src/system/streaming/podcastrss.h"
 #include "src/system/streaming/podcastsubs.h"
-#include "src/system/streaming/streamkeys.h"
 
-// The default endpoint. Configurable for the same reason the Qobuz and Tidal
-// ones are: point it at a fake server and exercise the whole flow without
-// spending real calls.
-#define PODCAST_API_DEFAULT "https://api.podcastindex.org/api/1.0"
+// The two endpoints, both Apple's and both free, with no key and no signature.
+// Configurable so a fake server can stand in for them in a test.
+//
+//   search_base: the iTunes Search API, for search and lookup by id.
+//   chart_base:  Apple's marketing RSS, for the per-country top chart.
+#define ITUNES_SEARCH_DEFAULT "https://itunes.apple.com"
+#define ITUNES_CHART_DEFAULT "https://rss.marketingtools.apple.com/api/v2"
 
-// The most a response is expected to carry. A page of sixty episodes with long
-// descriptions stays well under half a megabyte, but the lists can now ask for
-// up to 240 at once because the directory has no offset parameter. Four
-// megabytes covers the worst case and still cuts off anything else.
-#define PODCAST_BODY_MAX (4 * 1024 * 1024)
+// A search page of 200 podcasts with their artwork addresses stays far under
+// a megabyte; this only cuts off something that is not an answer.
+#define PODCAST_BODY_MAX (2 * 1024 * 1024)
 #define PODCAST_TIMEOUT_SECS 15
+
+// The most the Search API returns for one query: it has no offset, so a list
+// scrolled past this has simply reached the end.
+#define ITUNES_SEARCH_MAX 200
+// The most the chart lists.
+#define ITUNES_CHART_MAX 100
 
 static __thread char last_error[256];
 
@@ -35,98 +39,65 @@ static void set_error(const char *what) { snprintf(last_error, sizeof(last_error
 
 void podcast_set_last_error(const char *what) { set_error(what); }
 
-bool podcast_configured(void) { return streamkeys_podcast_key() && streamkeys_podcast_secret(); }
+// The catalogue needs no keys, so it is always there; only the network can be
+// missing, and the pages check that themselves.
+bool podcast_configured(void) { return true; }
 
-// The ceiling the directory accepts for `max`: a thousand, per its docs. The
-// lists ask for more than one screenful at a time when scrolled to the bottom,
-// since the directory has no offset, so the right limit here is the API's and
-// not that of a single on-screen page.
-#define PODCAST_API_MAX 1000
+static const char *search_base(void) { return config_get("podcast", "search_base", ITUNES_SEARCH_DEFAULT); }
+static const char *chart_base(void) { return config_get("podcast", "chart_base", ITUNES_CHART_DEFAULT); }
 
-static const char *api_base(void) { return config_get("podcast", "api_base", PODCAST_API_DEFAULT); }
-
-// The ISO code of the interface language, so a user running the player in
-// Italian does not get an all-English chart. The directory takes a
-// comma-separated list: the regional tags many Brazilian and Chinese feeds
-// declare are listed beside the bare code.
+// The store country, which decides the chart and ranks the search results.
+// Taken from the interface language, so a player in Italian gets the Italian
+// chart; [podcast] country (a two-letter code) overrides it for, say, a
+// Spanish speaker in Mexico.
 //
 // The table lives here rather than in lang.c because this is its only caller:
-// lang.c works in language names, which is what a menu needs, and teaching it
-// ISO codes for one caller would put weight in the wrong place.
-static const char *interface_language_code(void) {
+// lang.c works in language names, which is what a menu needs.
+static const char *store_country(void) {
+	const char *forced = config_get("podcast", "country", "");
+	if (forced && strlen(forced) == 2) {
+		return forced;
+	}
 	static const struct {
 		const char *name;
-		const char *code;
+		const char *country;
 	} MAP[] = {
 		{"Italiano", "it"},
-		{"English", "en"},
+		{"English", "us"},
 		{"Deutsch", "de"},
 		{"Fran\xC3\xA7\x61is", "fr"},
 		{"Espa\xC3\xB1ol", "es"},
-		{"Japanese", "ja"},
+		{"Japanese", "jp"},
 		{"Nederlands", "nl"},
 		{"Polski", "pl"},
 		{"Russian", "ru"},
-		{"Chinese", "zh,zh-cn"},
-		{"Portugu\xC3\xAAs BR", "pt,pt-br"},
+		{"Chinese", "cn"},
+		{"Portugu\xC3\xAAs BR", "br"},
 		{"\xC4\x8C"
 		 "e\xC5\xA1tina",
-		 "cs"},
+		 "cz"},
 	};
 	const char *current = lang_current();
 	for (size_t i = 0; i < sizeof(MAP) / sizeof(MAP[0]); i++) {
 		if (current && strcmp(current, MAP[i].name) == 0) {
-			return MAP[i].code;
+			return MAP[i].country;
 		}
 	}
-	return "en";
+	return "us";
 }
 
 // ---------------------------------------------------------------------------
-// the signed request
+// the request
 // ---------------------------------------------------------------------------
 
-// Fetches `path` (which starts with /) and returns the body for the caller to
-// free. NULL on error, with last_error already written.
-static char *api_get(const char *path) {
-	const char *key = streamkeys_podcast_key();
-	const char *secret = streamkeys_podcast_secret();
-	if (!key || !secret) {
-		set_error(tr("api_keys_unavailable"));
-		return NULL;
-	}
-
-	// Wall-clock seconds. Podcast Index tolerates a few minutes of skew and
-	// answers 401 beyond that; the 401 handling below recognises that case.
-	long now = (long)time(NULL);
-
-	char joined[256];
-	snprintf(joined, sizeof(joined), "%s%s%ld", key, secret, now);
-	char signature[SHA1_HEX_LEN];
-	sha1_hex(joined, strlen(joined), signature);
-
-	// The User-Agent is not politeness: the directory requires it and refuses
-	// requests without one.
-	char headers[512];
-	snprintf(headers, sizeof(headers),
-			 "X-Auth-Key: %s\r\n"
-			 "X-Auth-Date: %ld\r\n"
-			 "Authorization: %s\r\n"
-			 "User-Agent: " HTTP_USER_AGENT "\r\n",
-			 key, now, signature);
-
-	char url[PODCAST_URL_MAX + 256];
-	snprintf(url, sizeof(url), "%s%s", api_base(), path);
-
+// Fetches `url` and returns the body for the caller to free. NULL on error,
+// with last_error already written.
+static char *api_get(const char *url) {
 	char *body = NULL;
 	size_t len = 0;
 	int status = 0;
-
-	// want_error_body is true, which matters: with it http_get_ex returns true
-	// on a 4xx and hands over the body, where the directory explains itself.
-	// It also means the status has to be checked below rather than in the
-	// failure branch, which now only sees an unreachable network and 5xx.
-	if (!http_get_ex(url, headers, true, &body, &len, PODCAST_BODY_MAX, PODCAST_TIMEOUT_SECS, &status)) {
+	if (!http_get_ex(url, "User-Agent: " HTTP_USER_AGENT "\r\n", true, &body, &len, PODCAST_BODY_MAX,
+					 PODCAST_TIMEOUT_SECS, &status)) {
 		if (status >= 500) {
 			set_error(tr("podcast_the_podcast_directory_is_not_answering"));
 		} else if (status > 0) {
@@ -138,142 +109,90 @@ static char *api_get(const char *path) {
 		free(body);
 		return NULL;
 	}
-
+	// want_error_body is true, so a 4xx arrives here with its body.
 	if (status >= 400) {
-		if (status == 401 || status == 403) {
-			// A 401 from this directory means two very different things. The
-			// first is wrong keys. The second is the clock: the signature
-			// contains the time, the directory allows only a few minutes of
-			// skew, and this device loses the time at every power-off and gets
-			// it back from NTP as soon as there is a network. A player started
-			// without Wi-Fi believes it is 1970 and has every request refused.
-			//
-			// A year before 2020 is the unmistakable sign that NTP has not run
-			// yet, so the keys are not at fault and saying so points at the
-			// right fix.
-			struct tm tm_now;
-			time_t t = (time_t)now;
-			if (gmtime_r(&t, &tm_now) && tm_now.tm_year + 1900 < 2020) {
-				set_error(tr("podcast_clock_behind"));
-			} else {
-				set_error(tr("podcast_the_podcast_directory_refused_the_keys"));
-			}
-		} else {
-			snprintf(last_error, sizeof(last_error), tr("podcast_directory_status"), status);
-		}
+		snprintf(last_error, sizeof(last_error), tr("podcast_directory_status"), status);
 		free(body);
 		return NULL;
 	}
-
 	last_error[0] = '\0';
 	return body;
 }
 
 // ---------------------------------------------------------------------------
-// from JSON to structs
+// from iTunes JSON to podcast_feed_t
 // ---------------------------------------------------------------------------
 
-static void read_feed(const json_doc_t *doc, int obj, podcast_feed_t *out) {
+// One podcast of a Search API answer. False when it is no use: a podcast
+// without a feed address (Apple lists some that are Apple-only) cannot be
+// played here.
+//
+// The id is NOT the iTunes collectionId. It is the one podcastrss.c makes
+// from the feed address, so every podcast found in the catalogue is from then
+// on exactly a podcast read from its feed: its episodes come from the RSS
+// (complete, where the Search API stops at 200), and the cache, the downloads,
+// the resume points and the follows all work by the same id and address.
+static bool read_feed(const json_doc_t *doc, int obj, podcast_feed_t *out) {
 	memset(out, 0, sizeof(*out));
-	out->id = json_obj_llong(doc, obj, "id", 0);
-	json_obj_str(doc, obj, "title", out->title, sizeof(out->title));
-	json_obj_str(doc, obj, "author", out->author, sizeof(out->author));
-
-	// "image" is the podcast's own, "artwork" the already-square one the
-	// directory derives. Prefer artwork when present: the list thumbnails are
-	// square and a rectangular cover looks distorted in them.
-	if (!json_obj_str(doc, obj, "artwork", out->image, sizeof(out->image)) || !out->image[0]) {
-		json_obj_str(doc, obj, "image", out->image, sizeof(out->image));
+	if (!json_obj_str(doc, obj, "feedUrl", out->url, sizeof(out->url)) || !out->url[0]) {
+		return false;
 	}
-	out->episode_count = (int)json_obj_long(doc, obj, "episodeCount", 0);
-	json_obj_str(doc, obj, "url", out->url, sizeof(out->url));
+	json_obj_str(doc, obj, "collectionName", out->title, sizeof(out->title));
+	if (!out->title[0]) {
+		return false;
+	}
+	json_obj_str(doc, obj, "artistName", out->author, sizeof(out->author));
+	// 600 px is the largest square Apple gives here; the list thumbnails and the
+	// cover both come from it.
+	if (!json_obj_str(doc, obj, "artworkUrl600", out->image, sizeof(out->image)) || !out->image[0]) {
+		json_obj_str(doc, obj, "artworkUrl100", out->image, sizeof(out->image));
+	}
+	out->episode_count = (int)json_obj_long(doc, obj, "trackCount", 0);
+	out->id = podcastrss_feed_id(out->url);
+	// So opening it finds the feed without asking anyone again.
+	podcastrss_remember(out->id, out->url);
+	return true;
 }
 
-static void read_episode(const json_doc_t *doc, int obj, podcast_episode_t *out) {
-	memset(out, 0, sizeof(*out));
-	out->id = json_obj_llong(doc, obj, "id", 0);
-	out->feed_id = json_obj_llong(doc, obj, "feedId", 0);
-	json_obj_str(doc, obj, "title", out->title, sizeof(out->title));
-	json_obj_str(doc, obj, "feedTitle", out->feed_title, sizeof(out->feed_title));
-	json_obj_str(doc, obj, "enclosureUrl", out->enclosure, sizeof(out->enclosure));
-	json_obj_str(doc, obj, "enclosureType", out->mime, sizeof(out->mime));
-	out->published = json_obj_long(doc, obj, "datePublished", 0);
-	out->duration_secs = (int)json_obj_long(doc, obj, "duration", 0);
-
-	// The episode's own artwork when it has one, the podcast's otherwise. Many
-	// episodes have none and the field comes back empty rather than absent.
-	if (!json_obj_str(doc, obj, "image", out->image, sizeof(out->image)) || !out->image[0]) {
-		json_obj_str(doc, obj, "feedImage", out->image, sizeof(out->image));
-	}
-}
-
-// How many entries the directory sent in the last response, before the
-// unusable ones (episodes with no audio) were dropped. This is the count that
-// says whether the response was full up to the requested ceiling, and so
-// whether there is probably more to ask for; judging that on the cleaned count
-// is wrong, because a single discard mid-page makes it look short when it is
-// not. Per thread, like last_error.
 static __thread int last_raw_count;
 
 int podcast_last_raw_count(void) { return last_raw_count; }
 
-// The path every list shares: fetch, check that the directory said yes, and
-// walk the named array.
-static int fetch_list(const char *path, const char *array_key, void *out, int max, bool episodes) {
+// Fetches a Search API answer ({"resultCount":N, "results":[...]}) and fills
+// `out` in the order Apple gives. last_raw_count is how many Apple sent, before
+// the podcasts without a feed were dropped: that says whether the answer filled
+// the limit asked for.
+static int fetch_feeds(const char *url, podcast_feed_t *out, int max) {
 	last_raw_count = 0;
-	char *body = api_get(path);
+	char *body = api_get(url);
 	if (!body) {
 		return -1;
 	}
-
 	json_doc_t doc;
 	if (!json_parse(body, &doc)) {
 		set_error(tr("podcast_directory_unparsable"));
 		free(body);
 		return -1;
 	}
-
-	int root = json_root(&doc);
-
-	// The directory answers 200 even when it found nothing: the truth is in
-	// "status", which is the string "true" or "false".
-	char status[16] = "";
-	if (json_obj_str(&doc, root, "status", status, sizeof(status)) && status[0] &&
-		(status[0] == 'f' || status[0] == 'F')) {
-		char description[200] = "";
-		json_obj_str(&doc, root, "description", description, sizeof(description));
-		set_error(description[0] ? description : tr("podcast_the_podcast_directory_found_nothing"));
-		json_free(&doc);
-		free(body);
-		return -1;
-	}
-
-	int arr = json_get(&doc, root, array_key);
-	int count = 0;
+	int arr = json_get(&doc, json_root(&doc), "results");
 	int len = json_len(&doc, arr);
 	last_raw_count = len;
+	int count = 0;
 	for (int i = 0; i < len && count < max; i++) {
 		int item = json_at(&doc, arr, i);
-		if (item < 0) {
+		if (item < 0 || !read_feed(&doc, item, &out[count])) {
 			continue;
 		}
-		if (episodes) {
-			podcast_episode_t *e = &((podcast_episode_t *)out)[count];
-			read_episode(&doc, item, e);
-			// An episode with no audio is not an episode: showing it would
-			// give a row that does nothing when touched.
-			if (e->id != 0 && e->enclosure[0]) {
-				count++;
-			}
-		} else {
-			podcast_feed_t *f = &((podcast_feed_t *)out)[count];
-			read_feed(&doc, item, f);
-			if (f->id != 0 && f->title[0]) {
-				count++;
-			}
+		// The same feed listed twice (a show and its rerun channel can share
+		// one) would be two rows doing the same thing.
+		bool dup = false;
+		for (int k = 0; k < count && !dup; k++) {
+			dup = out[k].id == out[count].id;
+		}
+		if (!dup) {
+			count++;
 		}
 	}
-
 	json_free(&doc);
 	free(body);
 	return count;
@@ -292,13 +211,9 @@ int podcast_search(const char *query, podcast_feed_t *out, int max) {
 	if (!query || !query[0] || !out || max <= 0) {
 		return -1;
 	}
-	// An address: the catalogue's podcast when it has one, the feed itself
-	// read otherwise.
+	// An address is read as the feed it is.
 	if (looks_like_address(query)) {
 		last_raw_count = 1;
-		if (podcast_configured() && podcast_feed_by_url(query, out) > 0) {
-			return 1;
-		}
 		if (!podcastrss_read_feed(query, out)) {
 			return -1;
 		}
@@ -308,29 +223,104 @@ int podcast_search(const char *query, podcast_feed_t *out, int max) {
 	char encoded[512];
 	http_url_encode(query, encoded, sizeof(encoded));
 
-	char path[640];
-	// No `clean`: it would drop podcasts marked explicit, which is not the
-	// player's choice to make for the listener.
-	snprintf(path, sizeof(path), "/search/byterm?q=%s&max=%d", encoded, max > PODCAST_API_MAX ? PODCAST_API_MAX : max);
-	return fetch_list(path, "feeds", out, max, false);
+	// No explicit filter: hiding explicit podcasts is not the player's choice
+	// to make for the listener.
+	char url[800];
+	snprintf(url, sizeof(url), "%s/search?media=podcast&entity=podcast&term=%s&limit=%d&country=%s",
+			 search_base(), encoded, max > ITUNES_SEARCH_MAX ? ITUNES_SEARCH_MAX : max, store_country());
+	return fetch_feeds(url, out, max);
+}
+
+// The chart of `country`: Apple's list gives only ids and names, so a second
+// call looks them all up at once for their feed addresses. Results keep the
+// chart's order.
+static int chart(const char *country, podcast_feed_t *out, int max) {
+	last_raw_count = 0;
+	int want = max > ITUNES_CHART_MAX ? ITUNES_CHART_MAX : max;
+
+	char url[256];
+	snprintf(url, sizeof(url), "%s/%s/podcasts/top/%d/podcasts.json", chart_base(), country, want);
+	char *body = api_get(url);
+	if (!body) {
+		return -1;
+	}
+	json_doc_t doc;
+	if (!json_parse(body, &doc)) {
+		set_error(tr("podcast_directory_unparsable"));
+		free(body);
+		return -1;
+	}
+	int arr = json_path(&doc, json_root(&doc), "feed.results");
+	int len = json_len(&doc, arr);
+
+	// The ids, in chart order, joined for one lookup. An iTunes id is at most
+	// ten digits; 100 of them and their commas fit easily.
+	long long ids[ITUNES_CHART_MAX];
+	int n_ids = 0;
+	char joined[ITUNES_CHART_MAX * 12 + 1] = "";
+	size_t used = 0;
+	for (int i = 0; i < len && n_ids < want; i++) {
+		char id_text[24] = "";
+		int item = json_at(&doc, arr, i);
+		if (item < 0 || !json_obj_str(&doc, item, "id", id_text, sizeof(id_text))) {
+			continue;
+		}
+		long long id = strtoll(id_text, NULL, 10);
+		if (id <= 0) {
+			continue;
+		}
+		ids[n_ids++] = id;
+		used += (size_t)snprintf(joined + used, sizeof(joined) - used, "%s%lld", used ? "," : "", id);
+	}
+	json_free(&doc);
+	free(body);
+	if (n_ids == 0) {
+		return 0;
+	}
+
+	char lookup[sizeof(joined) + 256];
+	snprintf(lookup, sizeof(lookup), "%s/lookup?entity=podcast&country=%s&id=%s", search_base(), country, joined);
+	body = api_get(lookup);
+	if (!body) {
+		return -1;
+	}
+	if (!json_parse(body, &doc)) {
+		set_error(tr("podcast_directory_unparsable"));
+		free(body);
+		return -1;
+	}
+	// The lookup answers in its own order; put it back in the chart's.
+	arr = json_get(&doc, json_root(&doc), "results");
+	len = json_len(&doc, arr);
+	int count = 0;
+	for (int c = 0; c < n_ids && count < max; c++) {
+		for (int i = 0; i < len; i++) {
+			int item = json_at(&doc, arr, i);
+			if (item < 0 || json_obj_llong(&doc, item, "collectionId", 0) != ids[c]) {
+				continue;
+			}
+			if (read_feed(&doc, item, &out[count])) {
+				count++;
+			}
+			break;
+		}
+	}
+	json_free(&doc);
+	free(body);
+	// The chart's length, not the lookup's: this is the list the page scrolls.
+	last_raw_count = n_ids;
+	return count;
 }
 
 int podcast_trending(podcast_feed_t *out, int max) {
 	if (!out || max <= 0) {
 		return -1;
 	}
-	char path[128];
-	// The interface language alone, not ",en": with English appended the chart
-	// filled up with American podcasts, which always trend, and the requested
-	// language disappeared among them. When that language yields nothing at
-	// all, fall back to English: a foreign chart beats an empty page.
-	snprintf(path, sizeof(path), "/podcasts/trending?max=%d&lang=%s",
-			 max > PODCAST_API_MAX ? PODCAST_API_MAX : max, interface_language_code());
-	int n = fetch_list(path, "feeds", out, max, false);
-	if (n == 0 && strcmp(interface_language_code(), "en") != 0) {
-		snprintf(path, sizeof(path), "/podcasts/trending?max=%d&lang=en",
-				 max > PODCAST_API_MAX ? PODCAST_API_MAX : max);
-		n = fetch_list(path, "feeds", out, max, false);
+	// A country without a chart of its own (Apple has none for a few) falls
+	// back to the US one: a foreign chart beats an empty page.
+	int n = chart(store_country(), out, max);
+	if (n <= 0 && strcmp(store_country(), "us") != 0) {
+		n = chart("us", out, max);
 	}
 	return n;
 }
@@ -345,139 +335,69 @@ static void rss_find(long long feed_id) {
 	}
 }
 
+// Every id the section hands out now is a feed id: an id from elsewhere is
+// one Podcast Index gave, which nothing here can look up any more.
+static bool legacy_id(long long id) {
+	if (podcastrss_is_id(id)) {
+		return false;
+	}
+	set_error(tr("podcast_gone"));
+	return true;
+}
+
 int podcast_episodes(long long feed_id, podcast_episode_t *out, int max) {
-	if (feed_id <= 0 || !out || max <= 0) {
+	if (feed_id <= 0 || !out || max <= 0 || legacy_id(feed_id)) {
 		return -1;
 	}
-	if (podcastrss_is_id(feed_id)) {
-		rss_find(feed_id);
-		return podcastrss_episodes(feed_id, out, max, &last_raw_count);
+	rss_find(feed_id);
+	// A podcast opened from the search but not followed is known only for this
+	// run. Its episodes can end up in the cache or the downloads, and after a
+	// restart those still have to find their feed: keep the address.
+	char url[PODCAST_FEED_URL_MAX];
+	char kept[PODCAST_FEED_URL_MAX];
+	if (podcastrss_url_for(feed_id, url, sizeof(url)) && !podcastsubs_address(feed_id, kept, sizeof(kept))) {
+		podcastsubs_keep_address(feed_id, url);
 	}
-	char path[128];
-	snprintf(path, sizeof(path), "/episodes/byfeedid?id=%lld&max=%d", feed_id,
-			 max > PODCAST_API_MAX ? PODCAST_API_MAX : max);
-	return fetch_list(path, "items", out, max, true);
+	return podcastrss_episodes(feed_id, out, max, &last_raw_count);
 }
 
 bool podcast_feed(long long feed_id, podcast_feed_t *out) {
-	if (feed_id <= 0 || !out) {
+	if (feed_id <= 0 || !out || legacy_id(feed_id)) {
 		return false;
 	}
-	if (podcastrss_is_id(feed_id)) {
-		rss_find(feed_id);
-		return podcastrss_feed(feed_id, out);
-	}
-	char path[128];
-	snprintf(path, sizeof(path), "/podcasts/byfeedid?id=%lld", feed_id);
-
-	char *body = api_get(path);
-	if (!body) {
-		return false;
-	}
-	json_doc_t doc;
-	if (!json_parse(body, &doc)) {
-		set_error(tr("podcast_directory_unparsable"));
-		free(body);
-		return false;
-	}
-	// Here the field is "feed", not "feeds": it is a single object.
-	int feed = json_get(&doc, json_root(&doc), "feed");
-	bool ok = false;
-	if (feed >= 0) {
-		read_feed(&doc, feed, out);
-		ok = out->id != 0;
-	}
-	json_free(&doc);
-	free(body);
-	if (!ok) {
-		set_error(tr("podcast_gone"));
-	}
-	return ok;
+	rss_find(feed_id);
+	return podcastrss_feed(feed_id, out);
 }
 
+// The Search API cannot be asked by feed address, so the answer is always "not
+// in the catalogue", without a request. The caller (the OPML import) then reads
+// the feed itself, which gives the same podcast with the same id a search
+// would.
 int podcast_feed_by_url(const char *url, podcast_feed_t *out) {
 	if (!url || !url[0] || !out) {
 		return -1;
 	}
-	char encoded[1200];
-	http_url_encode(url, encoded, sizeof(encoded));
-	char path[1300];
-	snprintf(path, sizeof(path), "/podcasts/byfeedurl?url=%s", encoded);
-
-	char *body = api_get(path);
-	if (!body) {
-		return -1;
-	}
-	json_doc_t doc;
-	if (!json_parse(body, &doc)) {
-		set_error(tr("podcast_directory_unparsable"));
-		free(body);
-		return -1;
-	}
-	// A match is the single object "feed"; no match is "feed" as an empty
-	// array, with status still "true".
-	int found = 0;
-	int feed = json_get(&doc, json_root(&doc), "feed");
-	if (feed >= 0) {
-		// An empty array reads as no id at all.
-		read_feed(&doc, feed, out);
-		if (out->id > 0) {
-			found = 1;
-			// The address asked for is the one the user knows the podcast by;
-			// the catalogue may hold a newer one after a move, and that is the
-			// one worth keeping.
-			if (!out->url[0]) {
-				snprintf(out->url, sizeof(out->url), "%s", url);
-			}
-		}
-	}
-	json_free(&doc);
-	free(body);
-	return found;
+	return 0;
 }
 
+// Episodes are only known through their feed (podcast_episode_in_feed).
 bool podcast_episode(long long episode_id, podcast_episode_t *out) {
-	if (episode_id <= 0 || !out) {
-		return false;
-	}
-	// Read from a feed: only its feed knows it (podcast_episode_in_feed).
-	if (podcastrss_is_id(episode_id)) {
-		set_error(tr("podcast_episode_gone"));
-		return false;
-	}
-	char path[128];
-	snprintf(path, sizeof(path), "/episodes/byid?id=%lld", episode_id);
-
-	char *body = api_get(path);
-	if (!body) {
-		return false;
-	}
-	json_doc_t doc;
-	if (!json_parse(body, &doc)) {
-		set_error(tr("podcast_directory_unparsable"));
-		free(body);
-		return false;
-	}
-	int episode = json_get(&doc, json_root(&doc), "episode");
-	bool ok = false;
-	if (episode >= 0) {
-		read_episode(&doc, episode, out);
-		ok = out->id != 0;
-	}
-	json_free(&doc);
-	free(body);
-	if (!ok) {
-		set_error(tr("podcast_episode_gone"));
-	}
-	return ok;
+	(void)episode_id;
+	(void)out;
+	set_error(tr("podcast_episode_gone"));
+	return false;
 }
 
 bool podcast_episode_in_feed(long long feed_id, long long episode_id, podcast_episode_t *out) {
-	if (podcastrss_is_id(episode_id)) {
-		rss_find(feed_id);
-		return podcastrss_episode(feed_id, episode_id, out);
+	if (!out || legacy_id(feed_id)) {
+		return false;
 	}
-	return podcast_episode(episode_id, out);
+	if (!podcastrss_is_id(episode_id)) {
+		set_error(tr("podcast_episode_gone")); // a Podcast Index episode id
+		return false;
+	}
+	rss_find(feed_id);
+	return podcastrss_episode(feed_id, episode_id, out);
 }
 
 // ---------------------------------------------------------------------------

@@ -113,7 +113,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 ## Podcasts
 
-- **Search** and **Trending** from the Podcast Index catalogue, or add a podcast by its feed address.
+- **Search** and **Trending** from Apple's iTunes catalogue (free, no API key; Trending is the chart of the store country, picked from the interface language or `[podcast] country`), or add a podcast by its feed address. Episodes are read straight from each podcast's RSS feed.
 - **Follow** up to 100 podcasts.
 - **Download** episodes to the card, one at a time or many together, and listen to them without Wi-Fi.
 - **Podcasts on the card** - your own podcasts are played too.
