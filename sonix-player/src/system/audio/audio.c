@@ -580,6 +580,14 @@ static void report_position(double seconds) {
 // itself entirely at that factor.
 static double playback_speed = 1.0;
 
+// True while a single-file book or episode plays. For one file there is no
+// track change for a deep output buffer to protect against: it is only delay
+// between a new speed and hearing it. A book split into parts (CD 1 / Disc 2)
+// and an episode queue do change file, and keep the deep buffer at each change.
+// Set at each track change before the PCM opens, read by open_pcm_device_now(),
+// and cleared on stop so the next source does not inherit it.
+static bool long_form_output;
+
 // What speed.c pulls its input through.
 typedef struct {
 	decoder_t *dec;
@@ -903,6 +911,17 @@ bool audio_get_bit_perfect(void) { return bit_perfect; }
 // cannot meet is settled downwards rather than refused.
 #define PERIOD_TARGET_MS 90
 #define PERIOD_FRAMES_MAX 32768
+
+// The buffer a single-file book or episode asks for, in the stock player's
+// time-based sizing. The whole point is that it is short enough that a speed
+// change is heard at once; the deep buffer is the fallback when a driver
+// refuses it. Multi-file books and episode queues keep the deep buffer so it
+// can absorb a stall at a file change.
+#define LONG_FORM_BUFFER_MS 300
+
+// The deep buffer expressed as a time-based value, for the fallback when a
+// caller asked for time-based sizing in the first place.
+#define LONG_FORM_FALLBACK_MS 750
 
 // The smallest period the two limits below will go down to: 23 ms at 44.1 kHz,
 // the size the stock player runs with.
@@ -1541,6 +1560,13 @@ static snd_pcm_t *open_pcm_device_now(int channels, int sample_rate, int bits_pe
 		}
 	}
 
+	// A single-file book or episode has no file change to ride out, so the deep
+	// buffer below is only delay between moving the speed and hearing it --
+	// 0.75 s at 44.1 kHz, and a second and a half at the 22.05 kHz most
+	// audiobooks are cut at. It asks for 300 ms instead, in the time-based way
+	// the stock player sizes its buffer; see below. A book split into parts and
+	// an episode queue do change file, and keep the deep buffer.
+
 	// A USB DAC is the exception, up to 192 kHz. Its buffer is not memory the
 	// card was given at boot, as the built-in DAC's is: snd-usb-audio allocates
 	// it at every open, together with the transfer buffers, and frees it at every
@@ -1580,6 +1606,11 @@ static snd_pcm_t *open_pcm_device_now(int channels, int sample_rate, int bits_pe
 	// The emulator asks for a much shorter buffer of its own and overrides both:
 	// see pcm_forced_buffer_ms.
 	int buffer_time_ms = pcm_forced_buffer_ms > 0 ? pcm_forced_buffer_ms : (int)config_get_int("audio", "buffer_time_ms", 0);
+	bool configured_time_based = buffer_time_ms > 0;
+	bool long_form = __atomic_load_n(&long_form_output, __ATOMIC_ACQUIRE);
+	if (long_form && buffer_time_ms <= 0) {
+		buffer_time_ms = LONG_FORM_BUFFER_MS;
+	}
 	if (buffer_time_ms > 0) {
 		unsigned int buffer_time = (unsigned int)buffer_time_ms * 1000u;   // microseconds
 		unsigned int period_time = buffer_time / 4;
@@ -1593,6 +1624,37 @@ static snd_pcm_t *open_pcm_device_now(int channels, int sample_rate, int bits_pe
 	}
 
 	err = snd_pcm_hw_params(pcm_handle, hw_params);
+
+	// A short buffer on a book is an optimisation, never a requirement. If this
+	// driver refuses the configuration -- or the kernel has no memory for it --
+	// the deep buffer the rest of the player uses is always the fallback: the
+	// book still plays, and only the speed change goes back to waiting for the
+	// buffer to drain. The fallback keeps whichever sizing mode the caller
+	// chose; it is not a licence to replace it with frame-based sizing.
+	if (err < 0 && long_form) {
+		fprintf(stderr, "audio: short buffer refused (%s), falling back to the deep one\n", snd_strerror(err));
+		snd_pcm_hw_params_copy(hw_params, unsized);
+		if (configured_time_based) {
+			// The user (or the emulator) chose time-based sizing: retry deeper
+			// in time rather than with frame counts they never asked for.
+			if (buffer_time_ms < LONG_FORM_FALLBACK_MS) {
+				buffer_time_ms = LONG_FORM_FALLBACK_MS;
+			}
+			unsigned int buffer_time = (unsigned int)buffer_time_ms * 1000u;
+			unsigned int period_time = buffer_time / 4;
+			snd_pcm_hw_params_set_buffer_time_near(pcm_handle, hw_params, &buffer_time, &dir);
+			snd_pcm_hw_params_set_period_time_near(pcm_handle, hw_params, &period_time, &dir);
+		} else {
+			// Frame-based was the original mode: restore it with the period
+			// already derived above, including the longer period chosen above
+			// 96 kHz. Resetting it to 4096 here would throw that derivation away.
+			buffer_time_ms = 0;
+			snd_pcm_hw_params_set_periods_near(pcm_handle, hw_params, &periods, &dir);
+			snd_pcm_hw_params_set_period_size_near(pcm_handle, hw_params, &period_size, &dir);
+		}
+		err = snd_pcm_hw_params(pcm_handle, hw_params);
+		long_form = false;
+	}
 
 	// Out of memory is not a refusal of the format. The driver is asking the
 	// kernel for the buffer this very moment, and after hours of reading the
@@ -4385,6 +4447,10 @@ void audio_resume(void) {
 
 void audio_stop(void) {
 	printf("stopping\n");
+	// Do not let a book's short buffer leak into whatever opens next (a radio
+	// station, a DLNA source, a plain song): audio_set_long_form() is set per
+	// track, and stopping is the one place every exit from a track goes through.
+	audio_set_long_form(false);
 	pthread_mutex_lock(&audio_mutex);
 	audio_command = AUDIO_CMD_STOP;
 	playback_status = AUDIO_STATUS_STOPPED;
@@ -4489,6 +4555,14 @@ void audio_set_speed(double factor) {
 	playback_speed = factor;
 	pthread_mutex_unlock(&audio_mutex);
 }
+
+// A single-file book or episode gets a short output buffer: the deep buffer
+// exists for a stall at a file change, which that track has none of, and every
+// millisecond of it sits between a new speed and hearing it. A book split into
+// parts and an episode queue keep the deep buffer. Set before the PCM opens,
+// from the same place as the speed itself; see apply_track_speed() and
+// open_pcm_device_now(). Cleared by audio_stop().
+void audio_set_long_form(bool on) { __atomic_store_n(&long_form_output, on, __ATOMIC_RELEASE); }
 
 double audio_get_speed(void) {
 	pthread_mutex_lock(&audio_mutex);

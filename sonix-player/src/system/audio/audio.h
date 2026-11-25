@@ -181,6 +181,13 @@ void audio_seek(double seconds);
 void audio_set_speed(double factor);
 double audio_get_speed(void);
 
+// A single-file book or episode keeps a shorter output buffer while it plays:
+// the deep buffer is there for a file change's stall, and its whole length
+// would otherwise sit between a new playback speed and hearing it. Books split
+// into parts and episode queues keep the deep buffer. Set at every track change
+// before playback starts; audio_stop() clears it.
+void audio_set_long_form(bool on);
+
 // Which ALSA device playback opens. "default" is the DAC and the jacks;
 // Bluetooth hands in a bluealsa PCM name ("bluealsa:DEV=..,PROFILE=a2dp"), so
 // the stream is encoded and sent to the headphones instead. NULL or an empty
