@@ -65,6 +65,10 @@ static lv_obj_t *screensaver_switch;
 static lv_obj_t *screensaver_pills;
 static lv_obj_t *screensaver_album_pill;
 static lv_obj_t *screensaver_images_pill;
+static lv_obj_t *screensaver_unlock_card;
+static lv_obj_t *screensaver_unlock_pills;
+static lv_obj_t *screensaver_swipe_pill;
+static lv_obj_t *screensaver_slider_pill;
 static lv_obj_t *rotate_switch;
 
 static void doubletap_toggle_cb(lv_event_t *e) {
@@ -86,13 +90,23 @@ static void screensaver_refresh(void) {
 	if (on) {
 		lv_obj_add_state(screensaver_switch, LV_STATE_CHECKED);
 		lv_obj_set_hidden(screensaver_pills, false);
+		if (screensaver_unlock_card) {
+			lv_obj_set_hidden(screensaver_unlock_card, false);
+		}
 	} else {
 		lv_obj_remove_state(screensaver_switch, LV_STATE_CHECKED);
 		lv_obj_set_hidden(screensaver_pills, true);
+		if (screensaver_unlock_card) {
+			lv_obj_set_hidden(screensaver_unlock_card, true);
+		}
 	}
 	screensaver_source_t source = screensaver_source();
 	settingsrow_pill_active(screensaver_album_pill, source == SCREENSAVER_SOURCE_ALBUM);
 	settingsrow_pill_active(screensaver_images_pill, source == SCREENSAVER_SOURCE_IMAGES);
+
+	screensaver_unlock_style_t style = screensaver_unlock_style();
+	settingsrow_pill_active(screensaver_swipe_pill, style == SCREENSAVER_UNLOCK_SWIPE_UP);
+	settingsrow_pill_active(screensaver_slider_pill, style == SCREENSAVER_UNLOCK_SLIDER);
 }
 
 static void screensaver_toggle_cb(lv_event_t *e) {
@@ -100,6 +114,15 @@ static void screensaver_toggle_cb(lv_event_t *e) {
 	// Just the setting: the screensaver belongs to the next wake, not to the
 	// moment the switch is flipped.
 	screensaver_set_enabled(lv_obj_has_state(screensaver_switch, LV_STATE_CHECKED));
+	screensaver_refresh();
+}
+
+static void screensaver_unlock_style_cb(lv_event_t *e) {
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
+	screensaver_unlock_style_t chosen = (screensaver_unlock_style_t)(intptr_t)lv_event_get_user_data(e);
+	screensaver_set_unlock_style(chosen);
 	screensaver_refresh();
 }
 
@@ -320,6 +343,13 @@ static void build_screen_page(gui_config_t *cfg) {
 		settingsrow_pill(screensaver_pills, "screensaver_source_album", SCREENSAVER_SOURCE_ALBUM, screensaver_source_cb);
 	screensaver_images_pill =
 		settingsrow_pill(screensaver_pills, "screensaver_source_images", SCREENSAVER_SOURCE_IMAGES, screensaver_source_cb);
+
+	screensaver_unlock_card = settingsrow_pills(container, "screensaver_unlock_style", &screensaver_unlock_pills);
+	screensaver_swipe_pill =
+		settingsrow_pill(screensaver_unlock_pills, "screensaver_unlock_swipe_up", SCREENSAVER_UNLOCK_SWIPE_UP, screensaver_unlock_style_cb);
+	screensaver_slider_pill =
+		settingsrow_pill(screensaver_unlock_pills, "screensaver_unlock_slider", SCREENSAVER_UNLOCK_SLIDER, screensaver_unlock_style_cb);
+
 	screensaver_refresh();
 
 	// Upside down, for holding the player the other way up.

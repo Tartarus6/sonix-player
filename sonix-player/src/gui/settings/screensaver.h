@@ -20,6 +20,16 @@ void screensaver_init(gui_config_t *cfg);
 void screensaver_set_enabled(bool enabled);
 bool screensaver_get_enabled(void);
 
+// How the screensaver is dismissed: swipe up across the whole screen (the
+// original gesture) or sliding a classic iPod Touch style slider bar.
+typedef enum {
+	SCREENSAVER_UNLOCK_SWIPE_UP = 0,
+	SCREENSAVER_UNLOCK_SLIDER,
+} screensaver_unlock_style_t;
+
+screensaver_unlock_style_t screensaver_unlock_style(void);
+void screensaver_set_unlock_style(screensaver_unlock_style_t style);
+
 // Where the picture comes from.
 //
 // Album is the artwork of what is playing, borrowed from the player and free.

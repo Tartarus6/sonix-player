@@ -21,6 +21,9 @@
 #include "src/gui/shell/confirm.h"
 #include "src/gui/shell/corners.h"
 #include "src/gui/settings/bootlogopage.h"
+#include "src/gui/settings/podmenu.h"
+#include "src/gui/shell/pod_home.h"
+#include "src/gui/shell/pod_layout.h"
 #include "src/gui/settings/kblayoutpage.h"
 #include "src/gui/settings/screensaver.h"
 #include "src/gui/library/audiobookextras.h"
@@ -654,6 +657,10 @@ void gui_init(gui_config_t *cfg) {
 	corners_init(cfg);
 
 	main_menu_init(cfg);
+	// The Pod home theme: a layer over the Classic tiles on the same screen,
+	// shown only while Settings > Appearance has Pod selected.
+	pod_layout_init();
+	pod_home_create(main_menu_screen, cfg);
 
 	music_init(cfg);
 	coverflow_init(cfg);
@@ -712,6 +719,7 @@ void gui_init(gui_config_t *cfg) {
 	// after devoptions: the system entry opens the page that can unlock it
 	systempage_init(cfg);
 	bootlogopage_init(cfg); // before appearance: its row carries the screen
+	podmenu_init(cfg);		// the Pod layout editor the appearance page opens
 	appearance_init(cfg);
 	language_init(cfg);
 	libraryscan_init(cfg);

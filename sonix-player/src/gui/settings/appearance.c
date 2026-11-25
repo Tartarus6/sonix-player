@@ -7,6 +7,8 @@
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/settings/bootlogopage.h"
+#include "src/gui/settings/podmenu.h"
+#include "src/gui/shell/pod_home.h"
 #include "src/gui/shell/corners.h"
 #include "src/gui/shell/settingsrow.h"
 #include "src/gui/shell/switcher.h"
@@ -26,6 +28,9 @@ static lv_obj_t *battery_percent_toggle;
 static lv_obj_t *statusbar_always_toggle;
 static lv_obj_t *rounded_corners_toggle;
 static lv_obj_t *text_size_pill[2]; // normal / large
+static lv_obj_t *btn_home_classic;
+static lv_obj_t *btn_home_pod;
+static lv_obj_t *home_layout_row; // shown only while Pod is active
 // The status bar draws the battery either way; this setting is only about the
 // number beside it, and is on by default.
 static void battery_percent_cb(lv_event_t *e) {
@@ -169,6 +174,66 @@ static lv_obj_t *make_clock_choice(lv_obj_t *parent, const char *text, int pos) 
 	return btn;
 }
 
+// Paints the home-theme pills: accent fill on the active one, neutral on the
+// other — the same logic as the dark/light and clock-position pickers above.
+static void refresh_home_theme_buttons(void) {
+	home_theme_t active = home_theme_get();
+
+	lv_obj_t *on = (active == HOME_THEME_POD) ? btn_home_pod : btn_home_classic;
+	lv_obj_t *off = (active == HOME_THEME_POD) ? btn_home_classic : btn_home_pod;
+
+	if (on) {
+		lv_obj_set_style_bg_color(on, theme()->accent, 0);
+		lv_obj_set_style_text_color(lv_obj_get_child(on, 0), lv_color_white(), 0);
+	}
+	if (off) {
+		lv_obj_set_style_bg_color(off, theme()->surface_pressed, 0);
+		lv_obj_set_style_text_color(lv_obj_get_child(off, 0), theme()->text_primary, 0);
+	}
+
+	// The "Home Layout" row is only meaningful while Pod is the active theme.
+	if (home_layout_row) {
+		lv_obj_set_hidden(home_layout_row, active != HOME_THEME_POD);
+	}
+}
+
+static void home_theme_pick_cb(lv_event_t *e) {
+	if (switcher_back_drag_active()) {
+		return;
+	}
+	home_theme_t t = (home_theme_t)(intptr_t)lv_event_get_user_data(e);
+	home_theme_set(t);
+	pod_home_apply_theme(); // swap the home screen now, no restart needed
+	refresh_home_theme_buttons();
+}
+
+// Reads podmenu_screen at tap time so it does not matter whether podmenu_init
+// ran before or after appearance_init.
+static void open_podmenu_cb(lv_event_t *e) {
+	(void)e;
+	if (switcher_back_drag_active() || !podmenu_screen) {
+		return;
+	}
+	switch_screen(podmenu_screen);
+}
+
+static lv_obj_t *make_home_choice(lv_obj_t *parent, const char *text, home_theme_t t) {
+	lv_obj_t *btn = lv_btn_create(parent);
+	lv_obj_set_size(btn, LV_SIZE_CONTENT, 64);
+	lv_obj_set_style_pad_hor(btn, 34, 0);
+	lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_shadow_width(btn, 0, 0);
+	lv_obj_set_style_border_width(btn, 0, 0);
+	lv_obj_add_event_cb(btn, home_theme_pick_cb, LV_EVENT_CLICKED, (void *)(intptr_t)t);
+
+	lv_obj_t *label = lv_label_create(btn);
+	lv_label_set_text(label, tr(text));
+	lv_obj_set_style_text_font(label, &font_ui_24, 0);
+	lv_obj_center(label);
+
+	return btn;
+}
+
 static void pick_cb(lv_event_t *e) {
 	bool dark = (bool)(uintptr_t)lv_event_get_user_data(e);
 	theme_set_dark(dark);
@@ -226,6 +291,44 @@ void appearance_init(gui_config_t *cfg) {
 
 	btn_dark = make_choice(row, "appearance_dark", true);
 	btn_light = make_choice(row, "appearance_light", false);
+
+	// Home screen layout theme: Classic (the existing tiles) or Pod (3×3 grid
+	// and dock). Same pill pattern as the dark/light picker above.
+	lv_obj_t *home_theme_card = lv_obj_create(container);
+	lv_obj_set_width(home_theme_card, lv_pct(100));
+	lv_obj_set_height(home_theme_card, LV_SIZE_CONTENT);
+	lv_obj_add_style(home_theme_card, &theme_style_card, 0);
+	lv_obj_set_style_radius(home_theme_card, 12, 0);
+	lv_obj_set_style_border_width(home_theme_card, 0, 0);
+	lv_obj_set_style_shadow_width(home_theme_card, 0, 0);
+	lv_obj_set_style_pad_all(home_theme_card, 20, 0);
+	lv_obj_set_style_pad_gap(home_theme_card, 18, 0);
+	lv_obj_set_scrollable(home_theme_card, false);
+	lv_obj_set_flex_flow(home_theme_card, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_flex_align(home_theme_card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+	lv_obj_t *home_theme_name = lv_label_create(home_theme_card);
+	lv_label_set_text(home_theme_name, tr("appearance_home_theme"));
+	lv_obj_add_style(home_theme_name, &theme_style_text, 0);
+	lv_obj_set_style_text_font(home_theme_name, &font_ui_24, 0);
+
+	lv_obj_t *home_theme_row = lv_obj_create(home_theme_card);
+	lv_obj_set_size(home_theme_row, lv_pct(100), LV_SIZE_CONTENT);
+	lv_obj_set_style_bg_opa(home_theme_row, 0, 0);
+	lv_obj_set_style_border_width(home_theme_row, 0, 0);
+	lv_obj_set_style_pad_all(home_theme_row, 0, 0);
+	lv_obj_set_style_pad_gap(home_theme_row, 14, 0);
+	lv_obj_set_scrollable(home_theme_row, false);
+	lv_obj_set_flex_flow(home_theme_row, LV_FLEX_FLOW_ROW);
+	lv_obj_set_flex_align(home_theme_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+	btn_home_classic = make_home_choice(home_theme_row, "appearance_home_classic", HOME_THEME_CLASSIC);
+	btn_home_pod = make_home_choice(home_theme_row, "appearance_pod", HOME_THEME_POD);
+
+	// The Layout Editor row opens podmenu. Only visible while Pod is active —
+	// hidden at startup and shown by refresh_home_theme_buttons when needed.
+	home_layout_row = settingsrow_add(container, "appearance_home_layout", NULL, open_podmenu_cb, NULL);
+	lv_obj_set_hidden(home_layout_row, true);
 
 	// A second card: where the clock sits in the status bar.
 	lv_obj_t *clock_card = lv_obj_create(container);
@@ -356,8 +459,10 @@ void appearance_init(gui_config_t *cfg) {
 	refresh_clock_buttons();
 	refresh_accent_buttons();
 	refresh_text_size_pills();
+	refresh_home_theme_buttons();
 	theme_register_refresh(refresh_buttons);
 	theme_register_refresh(refresh_text_size_pills);
 	theme_register_refresh(refresh_clock_buttons);
 	theme_register_refresh(refresh_accent_buttons);
+	theme_register_refresh(refresh_home_theme_buttons);
 }
