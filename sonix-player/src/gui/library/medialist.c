@@ -2530,7 +2530,7 @@ static void index_build(panel_t *p, gui_config_t *cfg) {
 
 	p->index_hint_label = lv_label_create(p->index_hint);
 	lv_label_set_text(p->index_hint_label, "");
-	lv_obj_set_style_text_font(p->index_hint_label, &font_ui_64_bold, 0);
+	lv_obj_set_style_text_font(p->index_hint_label, &font_ui_24_bold, 0);
 	lv_obj_set_style_text_color(p->index_hint_label, lv_color_white(), 0);
 	lv_obj_center(p->index_hint_label);
 
@@ -5045,14 +5045,14 @@ void medialist_open(const char *title, library_list_t kind, library_filter_t fil
 		lv_obj_set_hidden(p->empty, true);
 	}
 
-	// The A-Z strip, on the two long flat lists: all the tracks and all the
-	// records. The others are either short (an artist's albums) or not filed by
-	// letter at all (an artist's tracks gathered by record, Favourites in the
-	// order they were starred), and a strip of letters on those would point at
-	// rows that are not where it says.
+	// The A-Z strip, on the long flat name lists: all tracks, all records, and
+	// the lists of artists, album artists and genres. The others are either short
+	// (an artist's albums) or not filed by letter at all (an artist's tracks
+	// gathered by record, Favourites in the order they were starred), and a strip
+	// of letters on those would point at rows that are not where it says.
 	p->index_wanted = !by_date && ((kind == LIBRARY_LIST_TRACKS && filter == LIBRARY_FILTER_NONE) ||
 								   (kind == LIBRARY_LIST_ALBUMS && !artist_albums) || kind == LIBRARY_LIST_ARTISTS ||
-								   kind == LIBRARY_LIST_ALBUM_ARTISTS);
+								   kind == LIBRARY_LIST_ALBUM_ARTISTS || kind == LIBRARY_LIST_GENRES);
 	index_rebuild(p, p->index_wanted, sortable && sort_is_desc(kind));
 
 	// The list's real height before anything is worked out from it. Until its

@@ -33,6 +33,8 @@
 #include "src/system/playback/playlist.h"
 #include "src/system/core/lang.h"
 #include "src/system/core/utils.h"
+#include "src/gui/shell/azindex.h"
+#include "src/system/library/library.h"
 
 // ---------------------------------------------------------------------------
 // A windowed list.
@@ -93,6 +95,7 @@ lv_obj_t *browser_screen;
 static lv_obj_t *file_list; // the scrolling viewport
 static lv_obj_t *list_body; // as tall as the whole list; the rows live in here
 static lv_timer_t *thumb_timer;
+static azindex_t *az_index;
 
 static lv_style_t style_list_btn;
 static lv_style_t style_list_error;
@@ -449,6 +452,7 @@ static void list_scroll_cb(lv_event_t *e) {
 	(void)e;
 
 	window_update();
+	azindex_flash(az_index);
 
 	if (thumb_timer) {
 		lv_timer_resume(thumb_timer);
@@ -1406,6 +1410,7 @@ static void browser_open_dir(const char *path) {
 	shown.pool_used = 0;
 	lv_obj_set_height(list_body, ROW_PITCH);
 	lv_obj_scroll_to_y(file_list, 0, LV_ANIM_OFF);
+	azindex_set_rows(az_index, NULL, 0, false);
 
 	clear_message();
 	set_message("reading");
@@ -1418,6 +1423,72 @@ static void browser_open_dir(const char *path) {
 
 	lv_timer_reset(thumb_timer);
 	lv_timer_resume(thumb_timer);
+}
+
+// The strip has to use the alphabet that orders these rows. entry_cmp() ends
+// in strcasecmp() on the file name: ASCII case is folded to lower case,
+// punctuation and digits sort before A, and the bytes from '{' on -- including
+// UTF-8 lead bytes -- sort past Z. The library collation is a different
+// alphabet -- it skips leading articles and folds accents -- and would file
+// "The Beatles" under B while the row sits under T.
+static int browser_name_bucket(const char *name) {
+	unsigned char c = name ? (unsigned char)*name : 0;
+	if (c >= 'A' && c <= 'Z') {
+		c = (unsigned char)(c + ('a' - 'A'));
+	}
+	if (c >= 'a' && c <= 'z') {
+		return c - 'a' + 1;
+	}
+	if (c > 'z') {
+		// '{'..'~' and every UTF-8 lead byte sort past a folded 'z'.
+		return LIBRARY_INDEX_PAST_Z_SLOT;
+	}
+	return 0; // empty names, punctuation and digits are filed before A
+}
+
+// A row in record order -- a scanned track with a known place, or a cue track
+// -- is not filed by a letter: it follows its album/disc/track or its cue
+// number. Offering a letter for it would point into the middle of the record.
+static bool browser_filed_by_name(const entry_t *entry) {
+	if (entry->is_dir) {
+		return true;
+	}
+	if (entry->place.track > 0) {
+		return false;
+	}
+	return cue_split_path(shown.pool + entry->file_offset, NULL, 0) <= 0;
+}
+
+// Where each letter starts in the list on screen, so the A-Z strip can jump
+// to it. Folders come first, then files in record order where that is known
+// and alphabetically otherwise; only the rows ordered by name get a bucket,
+// and the first of those carrying a letter is where the strip lands.
+static void browser_rebuild_index(void) {
+	if (!az_index) {
+		return;
+	}
+
+	int first[LIBRARY_INDEX_BUCKETS];
+	for (int i = 0; i < LIBRARY_INDEX_BUCKETS; i++) {
+		first[i] = -1;
+	}
+	int filed = 0;
+	for (size_t i = 0; i < shown.count; i++) {
+		if (!browser_filed_by_name(&shown.entries[i])) {
+			continue;
+		}
+		int bucket = browser_name_bucket(entry_file(i));
+		if (first[bucket] < 0) {
+			first[bucket] = (int)i;
+		}
+		filed++;
+	}
+
+	if (filed < AZINDEX_MIN_ROWS) {
+		azindex_set_rows(az_index, NULL, 0, false);
+		return;
+	}
+	azindex_set_rows(az_index, first, filed, false);
 }
 
 // Takes the finished listing over from the reader thread. Runs on the UI
@@ -1492,6 +1563,8 @@ static void adopt_listing(void) {
 	}
 
 	update_corner_buttons();
+	browser_rebuild_index();
+	azindex_flash(az_index);
 
 	fprintf(stderr, "browser: '%s': %zu entries, %d row widgets, %zu KB of names\n", current_path, shown.count,
 			ROW_POOL, shown.pool_used / 1024);
@@ -1670,6 +1743,7 @@ void browser_init(gui_config_t *cfg) {
 	lv_obj_set_style_pad_ver(file_list, 0, 0);
 	lv_obj_set_flex_grow(file_list, 1);
 	lv_obj_set_scroll_dir(file_list, LV_DIR_VER);
+	lv_obj_set_scrollbar_mode(file_list, LV_SCROLLBAR_MODE_AUTO);
 	lv_obj_add_event_cb(file_list, list_scroll_cb, LV_EVENT_SCROLL, NULL);
 
 	// As tall as the entire list. This is what gives the viewport something to
@@ -1692,6 +1766,10 @@ void browser_init(gui_config_t *cfg) {
 	// swipe-back drag can start on.
 	player_sheet_attach_drag(file_list, true);
 	switcher_attach_back_gesture(file_list);
+
+	// A-Z strip down the right edge, like the Artist/Album lists: it appears
+	// while the list moves and jumps to a letter on tap or slide.
+	az_index = azindex_create(browser_screen, cfg, file_list, ROW_PITCH, window_update);
 
 	// Artwork is decoded on one thread, directories are read on another; the
 	// interface thread only ever draws.

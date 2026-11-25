@@ -152,7 +152,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 ## More
 
-- **File manager** - browse the card, create folders, rename, move, copy and delete. Pictures and text files open right there.
+- **File manager** - browse the card, with an A-Z index and scrollbar in long lists, create folders, rename, move, copy and delete. Pictures and text files open right there.
 - **Metronome** - 30 to 250 BPM, up to 7 beats per bar, and tap tempo.
 - **Game Boy** (Gearboy) - plays Game Boy and Game Boy Color games, with their real names, save states, five palettes, shaders and color correction.
   > ROMs go in `Games/GB` and `Games/GBC`. The boot ROMs (optional) go in `Games/Bios`: `dmg_boot.bin` and `cgb_boot.bin`.
