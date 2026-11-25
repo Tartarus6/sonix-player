@@ -408,6 +408,28 @@ void theme_set_accent(int index) {
 
 bool theme_dynamic_tint(void) { return dynamic_tint; }
 
+// ---------------------------------------------------------------------------
+// Home screen layout theme
+// ---------------------------------------------------------------------------
+
+home_theme_t home_theme_get(void) {
+	long v = config_get_int("ui", "home_theme", (long)HOME_THEME_CLASSIC);
+	if (v != (long)HOME_THEME_POD) {
+		return HOME_THEME_CLASSIC;
+	}
+	return HOME_THEME_POD;
+}
+
+void home_theme_set(home_theme_t t) {
+	// Clamp any unexpected value to CLASSIC so the config stays well-formed.
+	if (t != HOME_THEME_POD) {
+		t = HOME_THEME_CLASSIC;
+	}
+	config_set_int("ui", "home_theme", (long)t);
+	config_save();
+	// The caller swaps the visible home with pod_home_apply_theme().
+}
+
 void theme_set_dynamic_tint(bool on) {
 	if (dynamic_tint == on) {
 		return;

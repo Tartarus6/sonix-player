@@ -10,6 +10,7 @@
 #include "src/gui/nowplaying/coverloader.h"
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/clocklabel.h"
+#include "src/gui/shell/pod_home.h"
 #include "src/gui/shell/icons.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/shell/scrolltext.h"
@@ -19,6 +20,7 @@
 #include "src/system/playback/device_state.h"
 #include "src/system/device/power.h"
 #include "src/system/device/screensaverpics.h"
+#include "src/system/core/lang.h"
 
 // Movement that turns a press into a drag, and how long the slide that follows
 // the release lasts. The dismiss threshold itself is a quarter of the screen,
@@ -26,6 +28,10 @@
 // centre.
 #define DRAG_ENGAGE_PX 8
 #define DISMISS_ANIM_MS 180
+#define FADE_ANIM_MS 260 // the slider style's way out
+// The slide-to-unlock bar's height, and its knob's, which leaves 4 px around it.
+#define SLIDER_H 76
+#define SLIDER_KNOB (SLIDER_H - 8)
 
 static lv_obj_t *saver;		 // the whole thing, full screen on the top layer
 static lv_obj_t *cover_img;	 // the artwork, filling what is above the strip
@@ -35,8 +41,37 @@ static lv_obj_t *cover_box;	 // the artwork's frame, everything above the strip
 static lv_obj_t *title_label;
 static lv_obj_t *artist_label;
 static lv_obj_t *clock_label;
+static lv_obj_t *clock_bar;   // slider style: the clock and date, across the top
+static lv_obj_t *date_label;
 static lv_timer_t *clock_timer;
 
+static screensaver_unlock_style_t unlock_style;
+static lv_obj_t *chevron_btn;
+static lv_obj_t *slider_bar;
+static lv_obj_t *slider_label;
+static lv_obj_t *shine_box;	  // a band of light that sweeps across the slider's text
+static lv_obj_t *shine_label; // ...the same words in white, shown through it
+static int shine_lx;
+static lv_obj_t *quality_badge; // the format over the artwork's corner, in the slider style
+static lv_obj_t *quality_label;
+static int art_top; // where the artwork starts below the clock band, in the slider style
+static lv_obj_t *slider_knob;
+static lv_obj_t *slider_knob_icon;
+
+typedef enum {
+	SLIDER_DIR_IDLE = 0,
+	SLIDER_DIR_RIGHT,
+	SLIDER_DIR_LEFT,
+} slider_drag_dir_t;
+
+static slider_drag_dir_t slider_drag_dir = SLIDER_DIR_IDLE;
+static int slider_start_touch_x;
+static int slider_start_knob_x;
+static bool slider_tracking;
+static void anim_knob_x_cb(void *obj, int32_t v);
+static void shine_cb(void *obj, int32_t v);
+static void slider_text_opa(lv_opa_t opa);
+static void shine_start(void);
 static bool enabled;
 static int screen_w, screen_h;
 static int strip_h;
@@ -89,7 +124,9 @@ static bool next_pending; // a request is out with the loader
 //
 // Cheap, and a no-op unless something has actually changed.
 static int cover_box_h;
-
+static int art_top_now(void) {
+	return unlock_style == SCREENSAVER_UNLOCK_SLIDER && source == SCREENSAVER_SOURCE_ALBUM ? art_top : 0;
+}
 static void set_strip_height(int height) {
 	if (height <= 0 || height >= screen_h) {
 		return;
@@ -99,10 +136,18 @@ static void set_strip_height(int height) {
 		lv_obj_set_height(info_strip, strip_h);
 		lv_obj_align(info_strip, LV_ALIGN_BOTTOM_MID, 0, 0);
 	}
-	int want = source == SCREENSAVER_SOURCE_IMAGES ? screen_h : screen_h - strip_h;
-	if (want != cover_box_h) {
+	// With the slider, the clock has a band of its own across the top and the
+	// artwork sits between it and the strip, rather than under the clock.
+	int top = art_top_now();
+	int want = source == SCREENSAVER_SOURCE_IMAGES ? screen_h : screen_h - strip_h - top;
+	if (want != cover_box_h || lv_obj_get_y(cover_box) != top) {
 		cover_box_h = want;
 		lv_obj_set_height(cover_box, cover_box_h);
+		lv_obj_set_y(cover_box, top);
+	}
+	if (clock_bar) {
+		// Solid over an album's artwork; see-through over a photograph.
+		lv_obj_set_style_bg_opa(clock_bar, source == SCREENSAVER_SOURCE_IMAGES ? LV_OPA_50 : LV_OPA_COVER, 0);
 	}
 }
 
@@ -110,6 +155,17 @@ bool screensaver_is_visible(void) { return saver && !lv_obj_is_hidden(saver); }
 bool screensaver_get_enabled(void) { return enabled; }
 
 screensaver_source_t screensaver_source(void) { return source; }
+
+screensaver_unlock_style_t screensaver_unlock_style(void) { return unlock_style; }
+
+static void screensaver_apply_unlock_style(void);
+
+void screensaver_set_unlock_style(screensaver_unlock_style_t style) {
+	unlock_style = (style == SCREENSAVER_UNLOCK_SLIDER) ? SCREENSAVER_UNLOCK_SLIDER : SCREENSAVER_UNLOCK_SWIPE_UP;
+	config_set_int("screen", "screensaver_unlock_style", (int)unlock_style);
+	config_save();
+	screensaver_apply_unlock_style();
+}
 
 static void request_next(void);
 static void drop_next(void);
@@ -212,7 +268,18 @@ void screensaver_set_enabled(bool on) {
 // what it shows
 // ---------------------------------------------------------------------------
 
-static void refresh_clock(void) { clocklabel_refresh(clock_label); }
+static void refresh_clock(void) {
+	clocklabel_refresh(clock_label);
+	if (date_label) {
+		char text[48] = "";
+		time_t now = time(NULL);
+		struct tm tm_now;
+		if (now > 1000000000 && localtime_r(&now, &tm_now)) {
+			strftime(text, sizeof(text), "%A, %B %-d", &tm_now);
+		}
+		lv_label_set_text(date_label, text);
+	}
+}
 
 // What refresh_content() last drew, so the tick below can tell an idle moment
 // from a track that changed while the screensaver was up.
@@ -308,6 +375,37 @@ static void draw_from_folder(void) {
 // so a track change while it is hidden can never leave a stale pointer here.
 // A picture from the folder is the other way round -- owned here, decoded here
 // and freed here.
+// The format badge over the artwork: the file's extension, and its bit depth
+// when the library has it ("FLAC 24bit"). Only in the slider style, over an
+// album's artwork, for a file.
+static void badge_update(const device_state_t *state) {
+	if (!quality_badge) {
+		return;
+	}
+	bool want = unlock_style == SCREENSAVER_UNLOCK_SLIDER && source == SCREENSAVER_SOURCE_ALBUM && !state->live &&
+				state->current_file[0] != '\0';
+	const char *dot = want ? strrchr(state->current_file, '.') : NULL;
+	if (!dot || !dot[1] || strlen(dot + 1) > 5) {
+		want = false;
+	}
+	if (want) {
+		char ext[8];
+		size_t n = 0;
+		for (const char *c = dot + 1; *c && n < sizeof(ext) - 1; c++) {
+			ext[n++] = (char)((*c >= 'a' && *c <= 'z') ? *c - 32 : *c);
+		}
+		ext[n] = '\0';
+		int bits = 0;
+		library_track_quality(state->current_file, NULL, &bits);
+		if (bits > 0) {
+			lv_label_set_text_fmt(quality_label, "%s %dbit", ext, bits);
+		} else {
+			lv_label_set_text(quality_label, ext);
+		}
+	}
+	lv_obj_set_hidden(quality_badge, !want);
+}
+
 static void refresh_content(void) {
 	device_state_t state;
 	device_state_get(&state);
@@ -343,6 +441,7 @@ static void refresh_content(void) {
 	// track change, and in Images mode a track change still has to redraw the
 	// title -- it just must not change the picture.
 	shown_cover = player_cover_image();
+	badge_update(&state);
 
 	if (source == SCREENSAVER_SOURCE_IMAGES) {
 		draw_from_folder();
@@ -368,7 +467,7 @@ static void refresh_content(void) {
 		// letterboxed cover with black bars would look like a bug, not a
 		// screensaver.
 		int32_t zoom_w = (256 * screen_w) / (int32_t)cover->header.w;
-		int32_t zoom_h = (256 * (screen_h - strip_h)) / (int32_t)cover->header.h;
+		int32_t zoom_h = (256 * (screen_h - strip_h - art_top_now())) / (int32_t)cover->header.h;
 		lv_image_set_scale(cover_img, zoom_w > zoom_h ? zoom_w : zoom_h);
 		lv_obj_set_hidden(cover_img, false);
 		lv_obj_set_hidden(cover_placeholder, true);
@@ -396,6 +495,8 @@ static void refresh_content(void) {
 // ---------------------------------------------------------------------------
 
 static void anim_y_cb(void *obj, int32_t v);
+static void fade_cb(void *obj, int32_t v);
+static bool fading_out;
 
 void screensaver_show(void) {
 	if (!saver || !enabled || screensaver_is_visible()) {
@@ -404,17 +505,40 @@ void screensaver_show(void) {
 
 	collect_next();
 	promote_next();
+	screensaver_apply_unlock_style();
 	refresh_content();
 	lv_anim_delete(saver, anim_y_cb);
+	lv_anim_delete(saver, fade_cb);
+	fading_out = false;
+	lv_obj_set_style_opa(saver, LV_OPA_COVER, 0);
 	lv_obj_set_y(saver, 0);
+	if (slider_knob) {
+		lv_anim_delete(slider_knob, anim_knob_x_cb);
+		lv_obj_set_x(slider_knob, 4);
+		if (slider_knob_icon) {
+			lv_image_set_src(slider_knob_icon, &icon_chevron_right);
+		}
+	}
+	if (slider_label) {
+		lv_label_set_text(slider_label, tr("screensaver_slide_to_unlock"));
+		lv_label_set_text(shine_label, tr("screensaver_slide_to_unlock"));
+		slider_text_opa(LV_OPA_70);
+	}
+	slider_drag_dir = SLIDER_DIR_IDLE;
+	slider_tracking = false;
+	screensaver_apply_unlock_style();
 	lv_obj_set_hidden(saver, false);
 	lv_obj_move_foreground(saver);
+	shine_start();
 	lv_timer_resume(clock_timer);
 }
 
 // Everything that has to happen once it is really gone, whether it was
 // dismissed by a tap, by a finished swipe, or by switching the option off.
 static void finish_hide(void) {
+	if (shine_box) {
+		lv_anim_delete(shine_box, shine_cb);
+	}
 	lv_obj_set_hidden(saver, true);
 	lv_obj_set_y(saver, 0);
 	lv_timer_pause(clock_timer);
@@ -453,6 +577,9 @@ static void slide_done_cb(lv_anim_t *a) {
 static void slide_to(int y) {
 	lv_anim_delete(saver, anim_y_cb);
 	sliding_out = (y != 0);
+	if (sliding_out) {
+		pod_home_play_enter(); // the icons fly in underneath as the screensaver leaves
+	}
 	lv_anim_t a;
 	lv_anim_init(&a);
 	lv_anim_set_var(&a, saver);
@@ -516,11 +643,46 @@ void screensaver_release_artwork(void) {
 	lv_obj_set_style_bg_opa(info_strip, LV_OPA_60, 0);
 }
 
+static void fade_cb(void *obj, int32_t v) { lv_obj_set_style_opa((lv_obj_t *)obj, (lv_opa_t)v, 0); }
+
+static void fade_done_cb(lv_anim_t *an) {
+	(void)an;
+	fading_out = false;
+	finish_hide();
+	lv_obj_set_style_opa(saver, LV_OPA_COVER, 0); // ready for the next time it is shown
+}
+
+// Dismisses it by fading to nothing over the home screen, where the icons are
+// already arriving.
+static void fade_out(void) {
+	if (fading_out) {
+		return;
+	}
+	fading_out = true;
+	lv_anim_delete(saver, anim_y_cb);
+	pod_home_play_enter();
+	lv_anim_t a;
+	lv_anim_init(&a);
+	lv_anim_set_var(&a, saver);
+	lv_anim_set_exec_cb(&a, fade_cb);
+	lv_anim_set_values(&a, LV_OPA_COVER, LV_OPA_TRANSP);
+	lv_anim_set_duration(&a, FADE_ANIM_MS);
+	lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+	lv_anim_set_completed_cb(&a, fade_done_cb);
+	lv_anim_start(&a);
+}
+
 void screensaver_hide(void) {
 	if (!saver || !screensaver_is_visible()) {
 		return;
 	}
-	slide_to(-screen_h);
+	// The slider's way out is a fade, like the iPod's: there is no finger to
+	// follow, so nothing slides. The swipe-up style keeps its slide.
+	if (unlock_style == SCREENSAVER_UNLOCK_SLIDER) {
+		fade_out();
+	} else {
+		slide_to(-screen_h);
+	}
 }
 
 // The swipe up, following the finger the whole way: the screensaver slides
@@ -533,6 +695,10 @@ static void drag_cb(lv_event_t *e) {
 
 	lv_indev_t *indev = lv_indev_active();
 	if (!indev) {
+		return;
+	}
+
+	if (unlock_style == SCREENSAVER_UNLOCK_SLIDER) {
 		return;
 	}
 
@@ -576,6 +742,230 @@ static void drag_cb(lv_event_t *e) {
 	}
 }
 
+// The words, and the light passing over them, fade together as the knob moves.
+static void slider_text_opa(lv_opa_t opa) {
+	lv_obj_set_style_text_opa(slider_label, opa, 0);
+	if (shine_label) {
+		lv_obj_set_style_text_opa(shine_label, opa, 0);
+	}
+}
+
+static void shine_cb(void *obj, int32_t v) {
+	(void)obj;
+	lv_obj_set_x(shine_box, v);
+	lv_obj_set_x(shine_label, shine_lx - v); // the white words stay where the grey ones are
+}
+
+static void shine_start(void) {
+	if (!shine_box || unlock_style != SCREENSAVER_UNLOCK_SLIDER) {
+		return;
+	}
+	lv_obj_update_layout(slider_bar);
+	shine_lx = lv_obj_get_x(slider_label);
+	int w = lv_obj_get_width(slider_label);
+	lv_obj_set_y(shine_label, lv_obj_get_y(slider_label));
+	lv_anim_delete(shine_box, shine_cb);
+	lv_anim_t a;
+	lv_anim_init(&a);
+	lv_anim_set_var(&a, shine_box);
+	lv_anim_set_exec_cb(&a, shine_cb);
+	lv_anim_set_values(&a, shine_lx - 80, shine_lx + w);
+	lv_anim_set_duration(&a, 1900);
+	lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+	lv_anim_set_repeat_delay(&a, 700);
+	lv_anim_set_path_cb(&a, lv_anim_path_linear);
+	lv_anim_start(&a);
+}
+
+static void anim_knob_x_cb(void *obj, int32_t v) {
+	lv_obj_set_x((lv_obj_t *)obj, v);
+}
+
+static void anim_knob_done_cb(lv_anim_t *a) {
+	(void)a;
+	if (slider_knob) {
+		lv_obj_set_x(slider_knob, 4);
+	}
+	if (slider_knob_icon) {
+		lv_image_set_src(slider_knob_icon, &icon_chevron_right);
+	}
+	if (slider_label) {
+		slider_text_opa(LV_OPA_70);
+	}
+	slider_drag_dir = SLIDER_DIR_IDLE;
+}
+
+static void anim_knob_to(int target_x) {
+	if (!slider_knob) {
+		return;
+	}
+	lv_anim_delete(slider_knob, anim_knob_x_cb);
+	lv_anim_t a;
+	lv_anim_init(&a);
+	lv_anim_set_var(&a, slider_knob);
+	lv_anim_set_exec_cb(&a, anim_knob_x_cb);
+	lv_anim_set_values(&a, lv_obj_get_x(slider_knob), target_x);
+	lv_anim_set_duration(&a, 180);
+	lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+	lv_anim_set_completed_cb(&a, anim_knob_done_cb);
+	lv_anim_start(&a);
+
+	if (slider_label) {
+		slider_text_opa(LV_OPA_70);
+	}
+}
+
+static void slider_drag_cb(lv_event_t *e) {
+	lv_indev_t *indev = lv_indev_active();
+	if (!indev || !slider_bar || !slider_knob) {
+		return;
+	}
+
+	lv_event_code_t code = lv_event_get_code(e);
+	lv_point_t p;
+	lv_indev_get_point(indev, &p);
+
+	int bar_w = lv_obj_get_width(slider_bar);
+	int knob_w = lv_obj_get_width(slider_knob);
+	int min_x = 4;
+	int max_x = bar_w - knob_w - 4;
+	int total_travel = max_x - min_x;
+	if (total_travel <= 0) {
+		total_travel = 1;
+	}
+
+	if (code == LV_EVENT_PRESSED) {
+		lv_area_t bar_coords;
+		lv_obj_get_coords(slider_bar, &bar_coords);
+		int touch_x = p.x - bar_coords.x1;
+
+		lv_anim_delete(slider_knob, anim_knob_x_cb);
+		slider_tracking = true;
+
+		if (touch_x > bar_w / 2) {
+			slider_drag_dir = SLIDER_DIR_LEFT;
+			slider_start_touch_x = p.x;
+			slider_start_knob_x = max_x;
+			lv_obj_set_x(slider_knob, max_x);
+			if (slider_knob_icon) {
+				lv_image_set_src(slider_knob_icon, &icon_chevron_left);
+			}
+		} else {
+			slider_drag_dir = SLIDER_DIR_RIGHT;
+			slider_start_touch_x = p.x;
+			slider_start_knob_x = min_x;
+			lv_obj_set_x(slider_knob, min_x);
+			if (slider_knob_icon) {
+				lv_image_set_src(slider_knob_icon, &icon_chevron_right);
+			}
+		}
+		if (slider_label) {
+			slider_text_opa(LV_OPA_70);
+		}
+		return;
+	}
+
+	if (!slider_tracking) {
+		return;
+	}
+
+	if (code == LV_EVENT_PRESSING) {
+		int dx = p.x - slider_start_touch_x;
+		int cur_x = slider_start_knob_x + dx;
+		if (cur_x < min_x) {
+			cur_x = min_x;
+		}
+		if (cur_x > max_x) {
+			cur_x = max_x;
+		}
+		lv_obj_set_x(slider_knob, cur_x);
+
+		int travel = (slider_drag_dir == SLIDER_DIR_RIGHT) ? (cur_x - min_x) : (max_x - cur_x);
+		int progress = (travel * 255) / total_travel;
+		int opa = (int)LV_OPA_70 - (progress * (int)LV_OPA_70) / 180;
+		if (opa < 0) {
+			opa = 0;
+		}
+		if (slider_label) {
+			slider_text_opa((lv_opa_t)opa);
+		}
+		return;
+	}
+
+	if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+		slider_tracking = false;
+		int cur_x = lv_obj_get_x(slider_knob);
+		bool unlocked = false;
+
+		if (slider_drag_dir == SLIDER_DIR_RIGHT) {
+			if (cur_x >= min_x + (total_travel * 7) / 10) {
+				unlocked = true;
+			}
+		} else if (slider_drag_dir == SLIDER_DIR_LEFT) {
+			if (cur_x <= min_x + (total_travel * 3) / 10) {
+				unlocked = true;
+			}
+		}
+
+		if (unlocked) {
+			screensaver_hide();
+			lv_obj_set_x(slider_knob, min_x);
+			if (slider_knob_icon) {
+				lv_image_set_src(slider_knob_icon, &icon_chevron_right);
+			}
+			if (slider_label) {
+				slider_text_opa(LV_OPA_70);
+			}
+			slider_drag_dir = SLIDER_DIR_IDLE;
+		} else {
+			anim_knob_to(min_x);
+		}
+	}
+}
+
+static void screensaver_apply_unlock_style(void) {
+	if (!saver) {
+		return;
+	}
+	if (unlock_style == SCREENSAVER_UNLOCK_SLIDER) {
+		if (chevron_btn) {
+			lv_obj_set_hidden(chevron_btn, true);
+		}
+		if (slider_bar) {
+			lv_obj_set_hidden(slider_bar, false);
+		}
+		if (info_strip) {
+			lv_obj_set_style_pad_bottom(info_strip, SLIDER_H + 32, 0);
+		}
+		// Like the iPod touch lock screen: the time and date at the top.
+		if (clock_bar && clock_label) {
+			lv_obj_set_parent(clock_label, clock_bar);
+			lv_obj_move_to_index(clock_label, 0);
+			lv_obj_set_hidden(clock_bar, false);
+			lv_obj_update_layout(clock_bar);
+			art_top = lv_obj_get_height(clock_bar);
+		}
+	} else {
+		art_top = 0;
+		if (clock_bar && clock_label) {
+			lv_obj_set_parent(clock_label, info_strip);
+			lv_obj_set_hidden(clock_bar, true);
+		}
+		if (chevron_btn) {
+			lv_obj_set_hidden(chevron_btn, false);
+		}
+		if (slider_bar) {
+			lv_obj_set_hidden(slider_bar, true);
+		}
+		if (info_strip) {
+			lv_obj_set_style_pad_bottom(info_strip, 18, 0);
+		}
+	}
+	// The artwork's frame depends on whether the clock has a band of its own.
+	cover_box_h = -1;
+	set_strip_height(strip_h);
+}
+
 void screensaver_init(gui_config_t *cfg) {
 	screen_w = cfg->screen_width;
 	screen_h = cfg->screen_height;
@@ -586,6 +976,9 @@ void screensaver_init(gui_config_t *cfg) {
 	source = config_get_int("screen", "screensaver_source", SCREENSAVER_SOURCE_ALBUM) == SCREENSAVER_SOURCE_IMAGES
 				 ? SCREENSAVER_SOURCE_IMAGES
 				 : SCREENSAVER_SOURCE_ALBUM;
+	unlock_style = config_get_int("screen", "screensaver_unlock_style", SCREENSAVER_UNLOCK_SWIPE_UP) == SCREENSAVER_UNLOCK_SLIDER
+					   ? SCREENSAVER_UNLOCK_SLIDER
+					   : SCREENSAVER_UNLOCK_SWIPE_UP;
 	cover_box_h = screen_h - strip_h;
 
 	saver = lv_obj_create(lv_layer_top());
@@ -632,6 +1025,24 @@ void screensaver_init(gui_config_t *cfg) {
 	lv_obj_center(cover_img);
 	lv_image_set_inner_align(cover_img, LV_IMAGE_ALIGN_CENTER);
 
+	// The format of the file, small, in the artwork's lower right corner.
+	quality_badge = lv_obj_create(cover_box);
+	lv_obj_set_size(quality_badge, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+	lv_obj_align(quality_badge, LV_ALIGN_BOTTOM_RIGHT, -16, -14);
+	lv_obj_set_style_bg_color(quality_badge, lv_color_black(), 0);
+	lv_obj_set_style_bg_opa(quality_badge, LV_OPA_70, 0);
+	lv_obj_set_style_border_width(quality_badge, 0, 0);
+	lv_obj_set_style_radius(quality_badge, 6, 0);
+	lv_obj_set_style_pad_hor(quality_badge, 8, 0);
+	lv_obj_set_style_pad_ver(quality_badge, 3, 0);
+	lv_obj_set_scrollable(quality_badge, false);
+	lv_obj_set_clickable(quality_badge, false);
+	lv_obj_set_hidden(quality_badge, true);
+	quality_label = lv_label_create(quality_badge);
+	lv_label_set_text(quality_label, "");
+	lv_obj_set_style_text_font(quality_label, &font_ui_16, 0);
+	lv_obj_set_style_text_color(quality_label, lv_color_white(), 0);
+
 	// The blurred block: the same picture the player draws its controls on.
 	info_strip = lv_obj_create(saver);
 	lv_obj_set_size(info_strip, screen_w, strip_h);
@@ -673,7 +1084,7 @@ void screensaver_init(gui_config_t *cfg) {
 	// does nothing, since the screensaver is only dismissed by dragging -- so it
 	// is not clickable and a finger landing on it talks to the saver underneath,
 	// where the drag gesture lives.
-	lv_obj_t *chevron_btn = lv_obj_create(saver);
+	chevron_btn = lv_obj_create(saver);
 	lv_obj_set_size(chevron_btn, 80, 52);
 	lv_obj_align(chevron_btn, LV_ALIGN_BOTTOM_MID, 0, -4);
 	lv_obj_set_style_bg_opa(chevron_btn, LV_OPA_TRANSP, 0);
@@ -689,6 +1100,96 @@ void screensaver_init(gui_config_t *cfg) {
 	lv_obj_set_style_image_recolor_opa(chevron, LV_OPA_COVER, 0);
 	lv_obj_set_style_image_opa(chevron, LV_OPA_70, 0);
 	lv_obj_center(chevron);
+
+	// The top of the iPod touch lock screen: a dark translucent band with the
+	// date under the time. The clock moves in here while the slider is the way
+	// out (see screensaver_apply_unlock_style).
+	clock_bar = lv_obj_create(saver);
+	lv_obj_set_size(clock_bar, screen_w, LV_SIZE_CONTENT);
+	lv_obj_align(clock_bar, LV_ALIGN_TOP_MID, 0, 0);
+	lv_obj_set_style_bg_color(clock_bar, lv_color_make(17, 19, 23), 0);
+	lv_obj_set_style_bg_opa(clock_bar, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(clock_bar, 0, 0);
+	lv_obj_set_style_radius(clock_bar, 0, 0);
+	lv_obj_set_style_pad_hor(clock_bar, 0, 0);
+	lv_obj_set_style_pad_top(clock_bar, 22, 0);
+	lv_obj_set_style_pad_bottom(clock_bar, 20, 0);
+	lv_obj_set_style_pad_gap(clock_bar, 0, 0);
+	lv_obj_set_scrollable(clock_bar, false);
+	lv_obj_set_clickable(clock_bar, false);
+	lv_obj_set_flex_flow(clock_bar, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_flex_align(clock_bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	lv_obj_set_hidden(clock_bar, true);
+
+	date_label = lv_label_create(clock_bar);
+	lv_obj_set_style_text_font(date_label, &font_ui_24, 0);
+	lv_obj_set_style_text_color(date_label, lv_color_make(229, 231, 235), 0);
+	lv_obj_set_clickable(date_label, false);
+
+	// iPod Touch classic slide-to-unlock bar
+	slider_bar = lv_obj_create(saver);
+	lv_obj_set_size(slider_bar, 400, SLIDER_H);
+	lv_obj_align(slider_bar, LV_ALIGN_BOTTOM_MID, 0, -16);
+	lv_obj_set_style_bg_color(slider_bar, lv_color_make(42, 45, 51), 0);
+	lv_obj_set_style_bg_opa(slider_bar, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(slider_bar, 0, 0);
+	lv_obj_set_style_radius(slider_bar, SLIDER_H / 2, 0);
+	lv_obj_set_style_pad_all(slider_bar, 0, 0);
+	lv_obj_set_style_clip_corner(slider_bar, true, 0);
+	lv_obj_set_scrollable(slider_bar, false);
+	lv_obj_set_clickable(slider_bar, true);
+	lv_obj_add_event_cb(slider_bar, slider_drag_cb, LV_EVENT_PRESSED, NULL);
+	lv_obj_add_event_cb(slider_bar, slider_drag_cb, LV_EVENT_PRESSING, NULL);
+	lv_obj_add_event_cb(slider_bar, slider_drag_cb, LV_EVENT_RELEASED, NULL);
+	lv_obj_add_event_cb(slider_bar, slider_drag_cb, LV_EVENT_PRESS_LOST, NULL);
+
+	slider_label = lv_label_create(slider_bar);
+	lv_label_set_text(slider_label, tr("screensaver_slide_to_unlock"));
+	lv_obj_set_style_text_font(slider_label, &font_ui_20, 0);
+	lv_obj_set_style_text_color(slider_label, lv_color_make(156, 163, 175), 0);
+	lv_obj_set_style_text_opa(slider_label, LV_OPA_70, 0);
+	lv_obj_set_style_text_align(slider_label, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_align(slider_label, LV_ALIGN_CENTER, SLIDER_KNOB / 2, 0); // clear of the knob
+	lv_obj_set_clickable(slider_label, false);
+
+	// A band of light that sweeps across the words, as on the lock screen: the
+	// same words in white, shown only inside a moving window.
+	shine_box = lv_obj_create(slider_bar);
+	lv_obj_set_size(shine_box, 80, SLIDER_H);
+	lv_obj_set_pos(shine_box, 0, 0);
+	lv_obj_set_style_bg_opa(shine_box, LV_OPA_TRANSP, 0);
+	lv_obj_set_style_border_width(shine_box, 0, 0);
+	lv_obj_set_style_radius(shine_box, 0, 0);
+	lv_obj_set_style_pad_all(shine_box, 0, 0);
+	lv_obj_set_scrollable(shine_box, false);
+	lv_obj_set_clickable(shine_box, false);
+	shine_label = lv_label_create(shine_box);
+	lv_label_set_text(shine_label, tr("screensaver_slide_to_unlock"));
+	lv_obj_set_style_text_font(shine_label, &font_ui_20, 0);
+	lv_obj_set_style_text_color(shine_label, lv_color_white(), 0);
+	lv_obj_set_style_text_opa(shine_label, LV_OPA_70, 0);
+	lv_obj_set_clickable(shine_label, false);
+
+	slider_knob = lv_obj_create(slider_bar);
+	lv_obj_set_size(slider_knob, SLIDER_KNOB, SLIDER_KNOB);
+	lv_obj_set_pos(slider_knob, 4, 4);
+	lv_obj_set_style_bg_color(slider_knob, lv_color_white(), 0);
+	lv_obj_set_style_bg_opa(slider_knob, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(slider_knob, 0, 0);
+	lv_obj_set_style_radius(slider_knob, SLIDER_KNOB / 2, 0);
+	lv_obj_set_style_pad_all(slider_knob, 0, 0);
+	lv_obj_set_style_shadow_width(slider_knob, 0, 0);
+	lv_obj_set_scrollable(slider_knob, false);
+	lv_obj_set_clickable(slider_knob, false);
+
+	slider_knob_icon = lv_image_create(slider_knob);
+	lv_image_set_src(slider_knob_icon, &icon_chevron_right);
+	lv_obj_set_style_image_recolor(slider_knob_icon, lv_color_make(80, 80, 90), 0);
+	lv_obj_set_style_image_recolor_opa(slider_knob_icon, LV_OPA_COVER, 0);
+	lv_obj_center(slider_knob_icon);
+	lv_obj_set_clickable(slider_knob_icon, false);
+
+	screensaver_apply_unlock_style();
 
 	// One second, not ten: the clock only needs a minute's resolution, but the
 	// same tick is what notices a track change, and a screensaver that shows
