@@ -42,6 +42,7 @@
 #include "src/system/library/library.h"
 #include "src/system/library/lrclib.h"
 #include "src/system/library/lyrics.h"
+#include "src/gui/nowplaying/pixelplayer.h"
 #include "src/system/device/led.h"
 #include "src/system/playback/playlist.h"
 #include "src/system/streaming/podcast.h"
@@ -1779,7 +1780,9 @@ static void lyrics_find_sync(bool full) {
 	if (!lyrics_find_btn) {
 		return;
 	}
-	bool show = full && lyrics_now;
+	// Not under the Pixel arrangement, which has its own lyrics button: this
+	// one would come up over the queue button in its corner.
+	bool show = full && lyrics_now && !pixelplayer_is_active();
 	if (!show) {
 		lv_obj_set_hidden(lyrics_find_btn, true);
 		lyrics_find_make_room(NULL);
@@ -3026,6 +3029,9 @@ static void update_layout(const device_state_t *state) {
 	bool studio = layout_choice == PLAYER_LAYOUT_STUDIO;
 	bool wave = layout_choice == PLAYER_LAYOUT_ALTERNATIVE && local;
 	bool alt = wave;
+	// Pixel is a layer over the standard arrangement, which carries on
+	// underneath, out of sight.
+	pixelplayer_set_active(layout_choice == PLAYER_LAYOUT_PIXEL);
 
 	if (studio == layout_studio_now && alt == layout_alt_now && wave == layout_wave_now && lyrics == lyrics_allowed &&
 		alt_title_pill) {
@@ -4024,7 +4030,7 @@ static void speed_pick(void *user) {
 	update_speed_button();
 }
 
-static void speed_btn_event_cb(lv_event_t *e) {
+static void speed_menu_from(lv_obj_t *anchor) {
 	static const int CHOICES[] = {500, 750, 1000, 1250, 1500, 1750, 2000};
 	static const char *const LABELS[] = {"0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "1.75x", "2.0x"};
 	enum { CHOICE_COUNT = sizeof(CHOICES) / sizeof(CHOICES[0]) };
@@ -4044,8 +4050,14 @@ static void speed_btn_event_cb(lv_event_t *e) {
 		items[i].user = (void *)(intptr_t)CHOICES[i];
 		items[i].checked = CHOICES[i] == current;
 	}
-	popover_show(lv_event_get_current_target(e), items, CHOICE_COUNT);
+	popover_show(anchor, items, CHOICE_COUNT);
 }
+
+static void speed_btn_event_cb(lv_event_t *e) { speed_menu_from(lv_event_get_current_target(e)); }
+
+void player_open_speed_menu(lv_obj_t *anchor) { speed_menu_from(anchor); }
+
+int player_speed_permille(void) { return speed_current_permille(); }
 
 // Updates the repeat-mode button's icon and colour to reflect the active mode.
 // The icons are the white ARGB bitmaps generated from assets/icons/*.svg;
@@ -4469,7 +4481,7 @@ static void book_summary_action(void *user) {
 
 // The overflow button: the book's menu on a book, the episode queue on a
 // podcast, the track menu on anything else.
-static void more_btn_event_cb(lv_event_t *e) {
+static void more_menu_from(lv_obj_t *anchor) {
 	if (audiobook_mode) {
 		static const popover_item_t BOOK_ITEMS[] = {
 			{"chapters", book_chapters_action, NULL},
@@ -4477,7 +4489,7 @@ static void more_btn_event_cb(lv_event_t *e) {
 			{"bookmarks", book_bookmarks_action, NULL},
 			{"audiobook_summary", book_summary_action, NULL},
 		};
-		popover_show(lv_event_get_current_target(e), BOOK_ITEMS, (int)(sizeof(BOOK_ITEMS) / sizeof(BOOK_ITEMS[0])));
+		popover_show(anchor, BOOK_ITEMS, (int)(sizeof(BOOK_ITEMS) / sizeof(BOOK_ITEMS[0])));
 		return;
 	}
 	// A podcast has no chapters: it has episodes, and the episodes are already
@@ -4486,11 +4498,73 @@ static void more_btn_event_cb(lv_event_t *e) {
 		trackmenu_open_queue();
 		return;
 	}
-	trackmenu_open(lv_event_get_current_target(e));
+	trackmenu_open(anchor);
 }
+
+static void more_btn_event_cb(lv_event_t *e) { more_menu_from(lv_event_get_current_target(e)); }
+
+void player_open_more_menu(lv_obj_t *anchor) { more_menu_from(anchor); }
+
+player_kind_t player_kind(void) {
+	return audiobook_mode ? PLAYER_KIND_BOOK : podcast_mode ? PLAYER_KIND_PODCAST : PLAYER_KIND_MUSIC;
+}
+
+void player_skip_icons(const lv_image_dsc_t **prev, const lv_image_dsc_t **next) {
+	bool skips = audiobook_mode || podcast_mode;
+	int back = audiobook_skip_shown_back, forward = audiobook_skip_shown_forward;
+	*prev = !skips ? &icon_skip_back_large
+			: back == AUDIOBOOK_SKIP_HUGE ? &icon_prev_60
+			: back == AUDIOBOOK_SKIP_LONG ? &icon_prev_30
+										  : &icon_prev_10;
+	*next = !skips ? &icon_skip_forward_large
+			: forward == AUDIOBOOK_SKIP_HUGE ? &icon_next_60
+			: forward == AUDIOBOOK_SKIP_LONG ? &icon_next_30
+											 : &icon_next_10;
+}
+
+bool player_book_has_chapters(void) { return audiobook_mode && audiobook_has_chapters; }
+
+void player_book_chapters(void) { book_chapters_action(NULL); }
+
+void player_book_add_bookmark(void) { book_add_bookmark_action(NULL); }
 
 // Steps to the next playback mode: normal, loop the queue, loop the track,
 // shuffle once through, shuffle round and round.
+bool player_current_is_favourite(void) {
+	// update_fav_button() decides, by every source's own rules, and leaves the
+	// answer in the star it draws.
+	update_fav_button();
+	return fav_btn_icon && lv_image_get_src(fav_btn_icon) == &icon_star_filled;
+}
+
+void player_toggle_favourite(void) { fav_btn_event_cb(NULL); }
+
+void player_mode_changed(void) { update_repeat_button(); }
+
+const lyrics_t *player_current_lyrics(void) {
+	device_state_t state;
+	device_state_get(&state);
+	if (!lyrics_loaded || strcmp(state.current_file, lyrics_path) != 0) {
+		return NULL;
+	}
+	return &lyrics_cur;
+}
+
+void player_lyrics_search(void) { lyrics_search_start(); }
+
+bool player_cover_tone(uint32_t *tone) {
+	if (!current_cover.pixels) {
+		return false;
+	}
+	if (current_cover.has_tone) {
+		*tone = current_cover.tone;
+		return *tone != 0;
+	}
+	int luma = 0;
+	bool light = false;
+	return cover_page_tone(&current_cover, COVER_PAGE_LIGHT_FROM, tone, &luma, &light) && *tone != 0;
+}
+
 static void repeat_btn_event_cb(lv_event_t *e) {
 	(void)e;
 	playlist_cycle_mode();
@@ -5698,11 +5772,14 @@ void player_init(gui_config_t *cfg) {
 	int saved = (int)config_get_int("screen", "player_layout_alt", 0);
 	layout_choice = (saved == (int)PLAYER_LAYOUT_ALTERNATIVE)	? PLAYER_LAYOUT_ALTERNATIVE
 					: (saved == (int)PLAYER_LAYOUT_STUDIO)		? PLAYER_LAYOUT_STUDIO
+					: (saved == (int)PLAYER_LAYOUT_PIXEL)		? PLAYER_LAYOUT_PIXEL
 																: PLAYER_LAYOUT_STANDARD;
 	cover_accent = config_get_bool("screen", "cover_accent", false);
 	layout_alt_now = false; // apply_layout() below puts the standard one up first
 	layout_studio_now = false;
 	apply_layout();
+	pixelplayer_init(player_screen, cfg);
+	pixelplayer_set_active(layout_choice == PLAYER_LAYOUT_PIXEL);
 
 	theme_register_refresh(player_refresh_theme);
 }

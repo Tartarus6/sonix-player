@@ -3004,9 +3004,20 @@ typedef enum {
 
 static panel_t *sort_menu_panel;
 
+// The same menu opened from outside the list pages: which list, and whom to tell.
+static library_list_t sort_ext_kind;
+static void (*sort_ext_changed)(void);
 static void sort_picked(void *user) {
 	panel_t *p = sort_menu_panel;
+	sort_choice_t choice = (sort_choice_t)(intptr_t)user;
 	if (!p) {
+		if (sort_ext_changed) {
+			sort_set_added(sort_ext_kind, choice == SORT_ADDED_NEW || choice == SORT_ADDED_OLD);
+			sort_set_year(sort_ext_kind, choice == SORT_YEAR_UP || choice == SORT_YEAR_DOWN);
+			sort_set_desc(sort_ext_kind,
+						  choice == SORT_NAME_ZA || choice == SORT_ADDED_NEW || choice == SORT_YEAR_DOWN);
+			sort_ext_changed();
+		}
 		return;
 	}
 	sort_choice_t choice = (sort_choice_t)(intptr_t)user;
@@ -3014,6 +3025,56 @@ static void sort_picked(void *user) {
 	sort_set_year(p->kind, choice == SORT_YEAR_UP || choice == SORT_YEAR_DOWN);
 	sort_set_desc(p->kind, choice == SORT_NAME_ZA || choice == SORT_ADDED_NEW || choice == SORT_YEAR_DOWN);
 	reload_current(p);
+}
+
+bool medialist_sortable(library_list_t kind) {
+	return kind == LIBRARY_LIST_TRACKS || kind == LIBRARY_LIST_ALBUMS || kind == LIBRARY_LIST_ARTISTS ||
+		   kind == LIBRARY_LIST_ALBUM_ARTISTS;
+}
+
+const lv_image_dsc_t *medialist_sort_icon(library_list_t kind) {
+	bool desc = sort_is_desc(kind);
+	if (sort_can_year(kind, LIBRARY_FILTER_NONE) && sort_is_year(kind)) {
+		return desc ? &icon_sort_year_desc : &icon_sort_year_asc;
+	}
+	if (sort_can_date(kind, LIBRARY_FILTER_NONE) && sort_is_added(kind)) {
+		return desc ? &icon_sort_date_new : &icon_sort_date_old;
+	}
+	return desc ? &icon_sort_za : &icon_sort_az;
+}
+
+void medialist_sort_menu(lv_obj_t *anchor, library_list_t kind, void (*changed)(void)) {
+	if (!medialist_sortable(kind)) {
+		return;
+	}
+	sort_menu_panel = NULL;
+	sort_ext_kind = kind;
+	sort_ext_changed = changed;
+	if (!sort_can_date(kind, LIBRARY_FILTER_NONE)) {
+		sort_set_desc(kind, !sort_is_desc(kind));
+		if (changed) {
+			changed();
+		}
+		return;
+	}
+	bool desc = sort_is_desc(kind);
+	sort_choice_t current = desc ? SORT_NAME_ZA : SORT_NAME_AZ;
+	if (sort_can_year(kind, LIBRARY_FILTER_NONE) && sort_is_year(kind)) {
+		current = desc ? SORT_YEAR_DOWN : SORT_YEAR_UP;
+	} else if (sort_is_added(kind)) {
+		current = desc ? SORT_ADDED_NEW : SORT_ADDED_OLD;
+	}
+	static const char *const labels[SORT_CHOICES] = {
+		[SORT_NAME_AZ] = "medialist_sort_name_az",	   [SORT_NAME_ZA] = "medialist_sort_name_za",
+		[SORT_ADDED_NEW] = "medialist_sort_added_new", [SORT_ADDED_OLD] = "medialist_sort_added_old",
+		[SORT_YEAR_UP] = "medialist_sort_year_up",	   [SORT_YEAR_DOWN] = "medialist_sort_year_down",
+	};
+	int n = sort_can_year(kind, LIBRARY_FILTER_NONE) ? SORT_CHOICES : SORT_YEAR_UP;
+	popover_item_t items[SORT_CHOICES];
+	for (int i = 0; i < n; i++) {
+		items[i] = (popover_item_t){labels[i], sort_picked, (void *)(intptr_t)i, i == (int)current};
+	}
+	popover_show(anchor, items, n);
 }
 
 static void sort_clicked_cb(lv_event_t *e) {
@@ -3048,6 +3109,7 @@ static void sort_clicked_cb(lv_event_t *e) {
 		items[i] = (popover_item_t){labels[i], sort_picked, (void *)(intptr_t)i, i == (int)current};
 	}
 	sort_menu_panel = p;
+	sort_ext_changed = NULL;
 	popover_show(lv_event_get_current_target(e), items, n);
 }
 

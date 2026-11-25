@@ -14,6 +14,7 @@
 #include "src/gui/library/medialist.h"
 #include "src/gui/settings/musicsettings.h"
 #include "src/gui/library/playlistpage.h"
+#include "src/gui/library/pixellibrary.h"
 #include "src/gui/library/search.h"
 #include "src/gui/shell/settingsrow.h"
 #include "src/gui/shell/switcher.h"
@@ -252,6 +253,8 @@ void music_rebuild_tiles(void) {
 	// page scrolls.
 	gridpage_set_entries(tile_grid, grid_cfg, entries, in_use_n, 2, 3, true);
 	lv_obj_scroll_to_y(tile_grid, 0, LV_ANIM_OFF);
+	// The Pixel page's tabs are the same tiles, in the same order.
+	pixellibrary_refresh_tabs();
 }
 
 static void search_cb(lv_event_t *e) {
@@ -310,7 +313,27 @@ static void more_hint_play(void) {
 
 // The tiles, or what stands in for them: a note that the card is missing --
 // the index lives on it -- or the scan panel while nothing is indexed.
+static bool pixel_page;
+
+bool music_pixel_page(void) { return pixel_page; }
+
+static void show_tiles_or_panel(void);
+
+void music_set_pixel_page(bool on) {
+	pixel_page = on;
+	config_set_bool("library", "pixel_page", on);
+	config_save();
+	show_tiles_or_panel();
+}
+
 static void show_tiles_or_panel(void) {
+	// The Pixel page only over a library there is to show: with no card or
+	// nothing indexed, the usual note and scan button say so instead.
+	bool pixel = pixel_page && gui_card_available() && !(library_track_count() == 0 && !library_scan_running());
+	pixellibrary_show(pixel);
+	if (pixel) {
+		return;
+	}
 	if (!gui_card_available()) {
 		gridpage_show_no_card(tile_grid, empty_panel, show_tiles_or_panel);
 		return;
@@ -388,4 +411,8 @@ void music_init(gui_config_t *cfg) {
 	lv_obj_set_floating(more_hint, true);
 	lv_obj_set_hidden(more_hint, true);
 	lv_obj_add_event_cb(music_screen, screen_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
+
+	// The Pixel page, over all of the above while it is chosen.
+	pixel_page = config_get_bool("library", "pixel_page", false);
+	pixellibrary_create(music_screen, cfg);
 }
