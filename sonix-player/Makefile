@@ -229,9 +229,13 @@ HOST_OBJS = $(APP_SRCS:src/%.c=build_host/%.o) $(APP_CXX_SRCS:src/%.cpp=build_ho
 TARGET_OBJS = $(APP_SRCS:src/%.c=build_target/%.o) $(APP_CXX_SRCS:src/%.cpp=build_target/%.opp) \
 			  $(LVGL_SRCS:$(LVGL_DIR)/%.c=build_target/lvgl/%.o)
 
-.PHONY: all host target clean compile_commands.json
+.PHONY: all host target clean compile_commands.json test-radio-volume
 
 all: host compile_commands.json
+
+test-radio-volume: tools/radio_volume_test.c src/system/streaming/radio_volume.h src/system/audio/swvolume.c src/system/streaming/radio.c
+	gcc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -I. tools/radio_volume_test.c src/system/audio/swvolume.c -lm -o /tmp/radio_volume_test
+	/tmp/radio_volume_test
 
 host: $(HOST_BIN) compile_commands.json
 
