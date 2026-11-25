@@ -4,27 +4,26 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-// Podcast Index, the catalogue behind the Podcasts section.
+// The catalogue behind the Podcasts section: Apple's iTunes Search API, which
+// is free and needs no key, no account and no signature.
 //
-// A podcast is an RSS feed, yet the catalogue comes first, for two reasons:
+// A podcast is an RSS feed, yet the catalogue comes first, for search: without
+// one, the only way to find a podcast is to know its URL by heart and type it
+// on an on-screen keyboard. The catalogue answers "which podcasts match these
+// words" and "what is in this country's chart", and for each podcast gives its
+// feed address.
 //
-//   * search. Without a catalogue, the only way to find a podcast is to know
-//     its URL by heart and type it on an on-screen keyboard;
-//   * the format. Podcast RSS is XML with four namespaces on it (itunes:,
-//     podcast:, media:, content:), and the wild contains everything -- broken
-//     XML, dates in five formats, duplicated tags.
+// From there on everything is the feed: a podcast's id is the one
+// podcastrss.c makes from that address, and its episodes are read from the RSS
+// (podcastrss.h). The Search API lists at most 200 episodes and the feed has
+// them all; and with one kind of id, a podcast found by search and one typed
+// as an address are the same thing to the cache, the downloads, the resume
+// points and the follows.
 //
-// Podcast Index does both jobs: it searches, and it returns already normalized
-// JSON. It is also an open catalogue with no advertising. The feeds it does not
-// have are read directly (podcastrss.h), with ids of their own that the calls
-// below send there.
-//
-// The signature: every request carries three headers -- the key, the time, and
-// the SHA-1 of key+secret+time in hex. The time must be the real one to within
-// a few minutes, and this device loses the clock at every power-off and gets it
-// back from NTP at boot, so without network the time is wrong and the catalogue
-// answers 401. See podcast_last_error(), which recognizes that case and says so
-// plainly instead of leaving "401".
+// Ids from before this (Podcast Index numbers, below PODCASTRSS_ID_BASE) can no
+// longer be looked up. podcastsubs.c moves the followed ones to their feed id
+// at startup when it knows their address; the calls below answer "gone" for
+// any other.
 //
 // Everything in here blocks. Call only from the page's worker thread, never
 // from the UI thread.
@@ -39,15 +38,14 @@
 #define PODCAST_FEED_URL_MAX 384
 
 // The ids are 64-bit, and not out of generosity: on this device `long` is
-// 32-bit, and Podcast Index numbers episodes with eleven digits (16795090626
-// and the like). With a 32-bit `long` strtol does not get such a number wrong,
-// it saturates -- every episode collapses onto 2147483647, sharing one cache
-// file and one sidecar row. Feed ids are small and would fit, but they travel
-// with episode ids in too many places to be worth distinguishing.
+// 32-bit, and the ids are 62-bit hashes of the feed address and the episode
+// guid (podcastrss.h). With a 32-bit `long` strtol does not get such a number
+// wrong, it saturates -- every episode collapses onto 2147483647, sharing one
+// cache file and one sidecar row.
 
 // A podcast: the feed, not an episode.
 typedef struct {
-	long long id; // the Podcast Index id, which is how it is found again
+	long long id; // podcastrss_feed_id(url), which is how it is found again
 	char title[PODCAST_TITLE_MAX];
 	char author[PODCAST_AUTHOR_MAX];
 	char image[PODCAST_URL_MAX];
@@ -67,8 +65,8 @@ typedef struct {
 	int duration_secs;				 // 0 when unknown
 } podcast_episode_t;
 
-// Whether a key pair is present. Without one the section disables itself and
-// says so.
+// Whether the catalogue can be used. Always true: it needs no keys. Kept so the
+// pages keep one place to ask; the network they check themselves.
 bool podcast_configured(void);
 
 // Why the last call failed, already translated for display.
@@ -98,11 +96,12 @@ bool podcast_feed(long long feed_id, podcast_feed_t *out);
 
 // A podcast found by the address of its feed, the way an OPML file names it.
 // 1 when found, 0 when the catalogue does not have it, -1 when the catalogue
-// could not be asked (podcast_last_error() says why).
+// could not be asked. The iTunes catalogue cannot be searched by address, so
+// this answers 0 and the caller reads the feed (podcastrss_read_feed).
 int podcast_feed_by_url(const char *url, podcast_feed_t *out);
 
-// A single episode. Needed by the player, which has the id from the sidecar and
-// wants to know which podcast it belongs to.
+// A single episode by its id alone. Episodes are only known through their
+// feed, so this always fails: use podcast_episode_in_feed().
 bool podcast_episode(long long episode_id, podcast_episode_t *out);
 
 // The same when the podcast is known too, which is what an episode read from a

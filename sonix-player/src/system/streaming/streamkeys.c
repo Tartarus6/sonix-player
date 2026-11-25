@@ -21,8 +21,6 @@ static char qobuz_app_id[64];
 static char qobuz_app_secret[128];
 static char tidal_client_id[64];
 static char tidal_client_secret[128];
-static char podcast_key[64];
-static char podcast_secret[128];
 static char lastfm_key[64];
 static char lastfm_secret[64];
 static char source_path[256];
@@ -96,14 +94,6 @@ static void parse_line(char *line, char section[32]) {
 		} else if (strcmp(key, "app_secret") == 0) {
 			dest = qobuz_app_secret;
 			dest_size = sizeof(qobuz_app_secret);
-		}
-	} else if (strcmp(section, "podcast") == 0) {
-		if (strcmp(key, "api_key") == 0) {
-			dest = podcast_key;
-			dest_size = sizeof(podcast_key);
-		} else if (strcmp(key, "api_secret") == 0) {
-			dest = podcast_secret;
-			dest_size = sizeof(podcast_secret);
 		}
 	} else if (strcmp(section, "lastfm") == 0) {
 		if (strcmp(key, "api_key") == 0) {
@@ -260,7 +250,7 @@ void streamkeys_init(void) {
 	}
 
 	if (!path) {
-		printf("streamkeys: no %s, Tidal, Qobuz, podcasts and Last.fm stay off\n",
+		printf("streamkeys: no %s, Tidal, Qobuz and Last.fm stay off\n",
 			   configured && configured[0] ? configured : STREAMKEYS_PATH);
 		return;
 	}
@@ -270,10 +260,9 @@ void streamkeys_init(void) {
 	// The log records that the keys are present, never their values: the log
 	// lands on the card and from there goes to whoever asks for it about any
 	// problem at all.
-	printf("streamkeys: from %s -- Qobuz %s, Tidal %s, Podcast %s, Last.fm %s\n", path,
+	printf("streamkeys: from %s -- Qobuz %s, Tidal %s, Last.fm %s\n", path,
 		   qobuz_app_id[0] && qobuz_app_secret[0] ? "yes" : "no",
 		   tidal_client_id[0] && tidal_client_secret[0] ? "yes" : "no",
-		   podcast_key[0] && podcast_secret[0] ? "yes" : "no",
 		   lastfm_key[0] && lastfm_secret[0] ? "yes" : "no");
 }
 
@@ -284,8 +273,6 @@ const char *streamkeys_qobuz_app_secret(void) { return or_null(qobuz_app_secret)
 const char *streamkeys_tidal_client_id(void) { return or_null(tidal_client_id); }
 const char *streamkeys_tidal_client_secret(void) { return or_null(tidal_client_secret); }
 
-const char *streamkeys_podcast_key(void) { return or_null(podcast_key); }
-const char *streamkeys_podcast_secret(void) { return or_null(podcast_secret); }
 
 const char *streamkeys_lastfm_key(void) { return or_null(lastfm_key); }
 const char *streamkeys_lastfm_secret(void) { return or_null(lastfm_secret); }

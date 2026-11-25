@@ -591,8 +591,24 @@ static bool fetch(const char *url, parsed_t *out) {
 // the last feed read
 // ---------------------------------------------------------------------------
 
-static parsed_t cache;
-static struct timespec cache_at;
+// The last few feeds read, so going from one podcast to another and back, or
+// starting an episode of a podcast opened a moment ago, does not download and
+// parse the whole feed again. A feed can be megabytes, and on this device
+// reading one is most of a second of radio silence at best.
+//
+// Kept for RSS_CACHE_SECS each; when full, the one used longest ago makes way.
+#define RSS_CACHE_FEEDS 4
+
+typedef struct {
+	parsed_t parsed;
+	struct timespec read_at; // when it came from the network
+	struct timespec used_at; // when it was last asked for
+	bool valid;
+} cache_entry_t;
+
+static cache_entry_t cache[RSS_CACHE_FEEDS];
+// The entry cache_hold() returned with the lock held.
+static cache_entry_t *held;
 
 static long seconds_since(const struct timespec *t) {
 	struct timespec now;
@@ -600,25 +616,63 @@ static long seconds_since(const struct timespec *t) {
 	return (long)(now.tv_sec - t->tv_sec);
 }
 
-// Puts a feed just read in the cache; `fresh` is taken over.
+static bool older(const struct timespec *a, const struct timespec *b) {
+	return a->tv_sec < b->tv_sec || (a->tv_sec == b->tv_sec && a->tv_nsec < b->tv_nsec);
+}
+
+// Called with the lock held. The fresh entry for this feed, or NULL.
+static cache_entry_t *cache_find(long long feed_id) {
+	for (int i = 0; i < RSS_CACHE_FEEDS; i++) {
+		cache_entry_t *e = &cache[i];
+		if (e->valid && e->parsed.feed.id == feed_id && seconds_since(&e->read_at) < RSS_CACHE_SECS) {
+			clock_gettime(CLOCK_MONOTONIC, &e->used_at);
+			return e;
+		}
+	}
+	return NULL;
+}
+
+// Puts a feed just read in the cache; `fresh` is taken over. It replaces the
+// same feed's older copy, or an empty place, or the one used longest ago.
 static void cache_store(parsed_t *fresh) {
 	pthread_mutex_lock(&lock);
-	free(cache.episodes);
-	cache = *fresh;
-	clock_gettime(CLOCK_MONOTONIC, &cache_at);
+	cache_entry_t *slot = NULL;
+	for (int i = 0; i < RSS_CACHE_FEEDS && !slot; i++) {
+		if (cache[i].valid && cache[i].parsed.feed.id == fresh->feed.id) {
+			slot = &cache[i];
+		}
+	}
+	for (int i = 0; i < RSS_CACHE_FEEDS && !slot; i++) {
+		if (!cache[i].valid) {
+			slot = &cache[i];
+		}
+	}
+	if (!slot) {
+		slot = &cache[0];
+		for (int i = 1; i < RSS_CACHE_FEEDS; i++) {
+			if (older(&cache[i].used_at, &slot->used_at)) {
+				slot = &cache[i];
+			}
+		}
+	}
+	free(slot->parsed.episodes);
+	slot->parsed = *fresh;
+	slot->valid = true;
+	clock_gettime(CLOCK_MONOTONIC, &slot->read_at);
+	slot->used_at = slot->read_at;
 	pthread_mutex_unlock(&lock);
 	fresh->episodes = NULL;
 }
 
 // The feed `feed_id`, read now unless the cache has it. Called with the lock
-// not held; returns with it held on success.
+// not held; returns with it held on success, and `held` pointing at it.
 static bool cache_hold(long long feed_id) {
 	pthread_mutex_lock(&lock);
-	if (cache.feed.id == feed_id && seconds_since(&cache_at) < RSS_CACHE_SECS) {
+	held = cache_find(feed_id);
+	if (held) {
 		return true;
 	}
 	pthread_mutex_unlock(&lock);
-
 	char url[PODCAST_FEED_URL_MAX];
 	if (!podcastrss_url_for(feed_id, url, sizeof(url))) {
 		podcast_set_last_error(tr("podcast_gone"));
@@ -630,8 +684,9 @@ static bool cache_hold(long long feed_id) {
 	}
 	cache_store(&fresh);
 	pthread_mutex_lock(&lock);
-	if (cache.feed.id != feed_id) {
-		pthread_mutex_unlock(&lock); // replaced meanwhile by another reader
+	held = cache_find(feed_id);
+	if (!held) {
+		pthread_mutex_unlock(&lock); // pushed out meanwhile by other readers
 		podcast_set_last_error(tr("podcast_gone"));
 		return false;
 	}
@@ -659,9 +714,9 @@ int podcastrss_episodes(long long feed_id, podcast_episode_t *out, int max, int 
 	if (!out || max <= 0 || !cache_hold(feed_id)) {
 		return -1;
 	}
-	int n = cache.count < max ? cache.count : max;
+	int n = held->parsed.count < max ? held->parsed.count : max;
 	if (n > 0) {
-		memcpy(out, cache.episodes, sizeof(*out) * (size_t)n);
+		memcpy(out, held->parsed.episodes, sizeof(*out) * (size_t)n);
 	}
 	if (raw_count) {
 		// Full to the limit when there are more: the page asks for the next
@@ -676,7 +731,7 @@ bool podcastrss_feed(long long feed_id, podcast_feed_t *out) {
 	if (!out || !cache_hold(feed_id)) {
 		return false;
 	}
-	*out = cache.feed;
+	*out = held->parsed.feed;
 	pthread_mutex_unlock(&lock);
 	return true;
 }
@@ -686,9 +741,9 @@ bool podcastrss_episode(long long feed_id, long long episode_id, podcast_episode
 		return false;
 	}
 	bool found = false;
-	for (int i = 0; i < cache.count && !found; i++) {
-		if (cache.episodes[i].id == episode_id) {
-			*out = cache.episodes[i];
+	for (int i = 0; i < held->parsed.count && !found; i++) {
+		if (held->parsed.episodes[i].id == episode_id) {
+			*out = held->parsed.episodes[i];
 			found = true;
 		}
 	}
