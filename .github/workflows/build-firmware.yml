@@ -1,0 +1,201 @@
+name: Build firmware (R1 / R3 Pro II / V1)
+
+# CI builds the three device images from ONE application binary and uploads a
+# separate, clearly labelled artifact per device. It never releases, tags,
+# publishes or flashes anything. Stock firmware images are proprietary and are
+# supplied at build time through repository variables or secrets; the digests
+# are pinned in docs/firmware/STOCK_SHA256.sha256.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - integration/three-device
+      - main
+  pull_request:
+    paths:
+      - Makefile
+      - tools/prepare_stock_inputs.sh
+      - tools/validate_upt.py
+      - tools/check_language_keys.py
+      - sonix-packer/**
+      - sonix-player/Makefile
+      - .github/workflows/build-firmware.yml
+      - docs/firmware/STOCK_SHA256.sha256
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Configure these as repository variables (or secrets) with URLs to your own
+  # legally obtained stock firmware. A V1 URL may be a joined v1.zip, a raw
+  # v1_original.upt, or an archive containing it; when shipping the two split
+  # parts separately, set both V1 URLs below.
+  STOCK_URL_R1: ${{ vars.STOCK_R1_URL || secrets.STOCK_R1_URL }}
+  STOCK_URL_R3PROII: ${{ vars.STOCK_R3PROII_URL || secrets.STOCK_R3PROII_URL }}
+  STOCK_URL_V1: ${{ vars.STOCK_V1_URL || secrets.STOCK_V1_URL }}
+  STOCK_URL_V1_PART2: ${{ vars.STOCK_V1_PART2_URL || secrets.STOCK_V1_PART2_URL }}
+
+jobs:
+  checks:
+    name: Static checks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Shell syntax
+        run: |
+          set -euo pipefail
+          bash -n sonix-packer/sonix_firmware_packer.sh
+          bash -n sonix-packer/v1/*.sh
+          bash -n tools/prepare_stock_inputs.sh
+          echo "shell syntax OK"
+
+      - name: Python syntax and workflow YAML parse
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tools/validate_upt.py sonix-packer/v1/extract_base_build.py
+          python3 -m pip install --disable-pip-version-check -q pyyaml
+          python3 -c 'import yaml,sys; d=yaml.safe_load(open(sys.argv[1])); print("jobs:", ", ".join(d["jobs"]))' .github/workflows/build-firmware.yml
+
+      - name: Language key parity
+        run: python3 tools/check_language_keys.py
+
+      - name: Makefile parse check
+        run: |
+          set -euo pipefail
+          # Do not dry-run r1/r3proii/v1/all: GNU make still executes recipe
+          # lines containing $(MAKE) under -n. The app target recurses into
+          # sonix-player, whose dependency recipes recurse into FreeType/Opus
+          # before the preceding tar xf recipe has been printed but not run.
+          # Parse the Makefiles instead. -q never runs recipes; exit 1 only
+          # means the default goal is out of date, while >=2 is a parse error.
+          make -n help > /dev/null
+          mkdir -p sonix-player/lvgl  # satisfy the parse-time wildcard, no clone
+          status=0
+          make -C sonix-player -qp > /dev/null 2>&1 || status=$?
+          test "$status" -le 1
+          echo "Makefile parse OK"
+
+  firmware:
+    name: Build ${{ matrix.device }}
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        device: [r1, r3proii, v1]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install build and firmware tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git pkg-config texinfo bison flex gawk gperf patch \
+            xz-utils bzip2 gzip autoconf automake libtool libtool-bin \
+            libgmp-dev libmpfr-dev libmpc-dev \
+            p7zip-full squashfs-tools genisoimage python3 curl ca-certificates
+
+      - name: Restore cross-toolchain and target-library cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            sonix-player/rockbox-toolchain
+            sonix-player/freetype-target
+            sonix-player/audio-target
+            sonix-player/*.tar.gz
+            sonix-player/*.tar.bz2
+            sonix-player/*.tar.xz
+          key: sonix-target-${{ runner.os }}-${{ hashFiles('sonix-player/Makefile', 'sonix-player/rockboxdev/**') }}
+          restore-keys: sonix-target-${{ runner.os }}-
+
+      - name: Obtain verified stock input
+        env:
+          URL: ${{ matrix.device == 'r1' && env.STOCK_URL_R1 || (matrix.device == 'r3proii' && env.STOCK_URL_R3PROII || env.STOCK_URL_V1) }}
+          PART2_URL: ${{ matrix.device == 'v1' && env.STOCK_URL_V1_PART2 || '' }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/ci-stock"
+          if [ -z "${URL:-}" ]; then
+            echo "::error::no stock firmware URL configured for ${{ matrix.device }}. Set STOCK_${{ matrix.device }}_URL (or STOCK_V1_URL + STOCK_V1_PART2_URL) as a repository variable/secret." >&2
+            exit 1
+          fi
+          if [ -n "${PART2_URL:-}" ]; then
+            curl --fail --location --retry 3 --retry-all-errors "$URL" -o ci-stock/v1.zip.part1
+            curl --fail --location --retry 3 --retry-all-errors "$PART2_URL" -o ci-stock/v1.zip.part2
+            echo "SONIX_V1_INPUT=$GITHUB_WORKSPACE/ci-stock" >> "$GITHUB_ENV"
+          else
+            curl --fail --location --retry 3 --retry-all-errors "$URL" -o ci-stock/download
+            if [ "${{ matrix.device }}" = "v1" ]; then
+              echo "SONIX_V1_INPUT=$GITHUB_WORKSPACE/ci-stock/download" >> "$GITHUB_ENV"
+            else
+              cp ci-stock/download "ci-stock/${{ matrix.device }}_original.upt"
+              echo "SONIX_STOCK_DIR=$GITHUB_WORKSPACE/ci-stock" >> "$GITHUB_ENV"
+            fi
+          fi
+          find ci-stock -type f -printf '%P %s bytes\n'
+
+      - name: Build and validate ${{ matrix.device }}
+        run: make ${{ matrix.device }}
+
+      - name: Collect reports
+        env:
+          DEVICE: ${{ matrix.device }}
+          BUILT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          stage="build/firmware/$DEVICE"
+          mkdir -p "$RUNNER_TEMP/artifact" "$RUNNER_TEMP/report"
+          cp "$stage/$DEVICE.upt" "$RUNNER_TEMP/artifact/"
+          [ ! -f "$stage/v1_md5.txt" ] || cp "$stage/v1_md5.txt" "$RUNNER_TEMP/artifact/"
+          cp "$stage/validation.json" "$stage/validator.log" "$stage/packer.log" "$RUNNER_TEMP/report/"
+          image_sha="$(sha256sum "$stage/$DEVICE.upt" | awk '{print $1}')"
+          result="$(REPORT="$stage/validation.json" python3 -c 'import json,os; print(json.load(open(os.environ["REPORT"]))["result"])')"
+          {
+            echo "COMMUNITY FIRMWARE BUILD - $DEVICE"
+            echo "Commit: $BUILT_SHA"
+            echo "Image: $DEVICE.upt"
+            echo "SHA-256: $image_sha"
+            echo "Validation: $result"
+            echo
+            echo "Package structure and device identity were checked automatically."
+            echo "This is NOT flashability approval: no hardware testing was done."
+            echo "Keep the matching official firmware and checksum for recovery."
+          } | tee "$RUNNER_TEMP/report/BUILD-REPORT.txt"
+          {
+            echo "### $DEVICE"
+            echo "SHA-256: \`$image_sha\`"
+            echo "Validation: $result"
+            echo "SAFETY: structural result only; this image is NOT approved for flashing."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonix-firmware-${{ matrix.device }}-${{ github.sha }}
+          path: ${{ runner.temp }}/artifact/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload validation report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonix-validation-${{ matrix.device }}-${{ github.sha }}
+          path: ${{ runner.temp }}/report/
+          if-no-files-found: error
+          retention-days: 14

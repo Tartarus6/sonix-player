@@ -1,0 +1,11 @@
+Reviewed implementation commit (all source, assets, build/CI, reports, PDF, validator and screenshots):
+
+21e5fd2a9a7a53a97f03a996a848e0292465f95b
+
+Branch: integration/three-device
+Base commit: 7aa3637f7e7e0ad193994c79c055424a4edf056a
+Previous audit-only implementation commit: 3ab2f52b62766723ee9d5e47dfe86194843dfd94
+
+The following commit adds only this SHA record so that the reviewed commit can
+be named without changing the content it describes. No firmware image, source
+file or evidence was changed after the reviewed commit.
