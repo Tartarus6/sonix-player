@@ -937,6 +937,10 @@ build_one() {
 	# Nothing this script writes belongs in the image.
 	find "$SQUASH_DIR" -name '*.packer.tmp' -type f -delete 2>/dev/null || true
 
+	# strace is a debugging tool, never used at runtime. Dropping it keeps the
+	# image inside the 48 MiB firmware ceiling as the player grows.
+	rm -f "$SQUASH_DIR/usr/bin/strace" "$SQUASH_DIR/usr/bin/strace-log-merge"
+
 	ROOTFS_NEW="$OTA_DIR/rootfs.squashfs"
 	KERNEL_NEW="$KERNEL_DIR/xImage-$MODEL_DIR"
 

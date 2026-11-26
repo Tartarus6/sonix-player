@@ -14,6 +14,12 @@
 
 extern lv_obj_t *btsettings_screen;
 
+#ifdef HOST_BUILD
+// Simulator-only hook: opens the first paired device's menu for inspection.
+void btsettings_host_open_device_menu(void);
+void btsettings_host_show_consent(void);
+#endif
+
 void btsettings_init(gui_config_t *cfg);
 
 #endif /* BTSETTINGS_H */

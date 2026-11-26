@@ -11,6 +11,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "src/system/core/config.h"
 #include "src/system/core/utils.h"
 
 // ---------------------------------------------------------------------------
@@ -214,6 +215,22 @@ static const model_entry_t *entry_from_number(const char *number) {
 // Bluetooth calls them. Apple's default name carries the family ("Mattia's
 // AirPods Pro"), and a renamed pair simply lands on the generic picture, which
 // is the right answer when nothing is known.
+// AAP is Apple's private protocol. Probing every device that connects with a
+// connection to PSM 0x1001 makes some head units (a Dacia Media Display among
+// them) drop the whole link a second later. Only ask AirPods by name.
+static bool name_looks_like_airpods(const char *name) {
+	if (!name || !name[0]) {
+		return false;
+	}
+	char lower[NAME_LEN];
+	size_t i = 0;
+	for (; name[i] && i < sizeof(lower) - 1; i++) {
+		lower[i] = (char)tolower((unsigned char)name[i]);
+	}
+	lower[i] = '\0';
+	return strstr(lower, "airpods") != NULL;
+}
+
 static airpods_model_t model_from_name(const char *name) {
 	if (!name || !name[0]) {
 		return AIRPODS_MODEL_UNKNOWN;
@@ -864,7 +881,12 @@ static void *airpods_worker(void *unused) {
 			break;
 		}
 
-		if (mac[0] && tried < CONNECT_ATTEMPTS) {
+		// 0 = never probe, 1 = only AirPods by name (default), 2 = every
+		// device. A renamed AirPods still works through the "airpods" in its
+		// name; mode 2 is the escape hatch for an unusual alias.
+		int probe = (int)config_get_int("wireless", "bt_aap_probe", 1);
+		bool wants_aap = probe == 2 || (probe == 1 && name_looks_like_airpods(name));
+		if (mac[0] && wants_aap && tried < CONNECT_ATTEMPTS) {
 			int fd = aap_connect(mac);
 			if (fd >= 0) {
 				pthread_mutex_lock(&lock);

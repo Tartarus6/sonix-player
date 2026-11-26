@@ -18,8 +18,9 @@ static char device_name[64];
 static char dac_info[96];
 static char ota_repo[128];
 
-// Every player this binary knows how to be. Both serial prefixes are the ones
-// printed on the box.
+// Every player this binary knows how to be. Serial prefixes are the ones
+// printed on the boxes. The V1 row comes from the TempoTec fork's table; the
+// HiBy rows are unchanged.
 static const sysinfo_model_t MODELS[] = {
 	{
 		.name = "HiBy R3 Pro II",
@@ -44,6 +45,24 @@ static const sysinfo_model_t MODELS[] = {
 		.tap_wake = false,
 		.one_flank = true,
 		.media_keys_swapped = false,
+	},
+	{
+		// TempoTec Variations V1. Flags are the fork's measured behaviour:
+		// two CS43131s, AXP2101 charge control, SGM31324 LED, swapped media
+		// keys and a headset switch that reads 1 when both sockets are empty.
+		.name = "TempoTec V1",
+		.panel_width = 240,
+		.panel_height = 320,
+		.update_stem = "v1",
+		.serial_prefix = "V1",
+		.pmic_charger = true,
+		.cs43131 = false,
+		.tap_wake = false,
+		.one_flank = true,
+		.media_keys_swapped = true,
+		.compact_panel = true,
+		.sgm31324_led = true,
+		.headset_switch_idle_one = true,
 	},
 };
 

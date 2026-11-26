@@ -9,9 +9,11 @@
 
 #include "lvgl/lvgl.h"
 
+#include "src/gui/board_profile.h"
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/clocklabel.h"
 #include "src/gui/shell/icons.h"
+#include "src/gui/shell/volumereadout.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/shell/quickpanel.h"
 #include "src/gui/shell/theme.h"
@@ -256,7 +258,18 @@ void topbar_refresh_volume(int percent) {
 		percent = 100;
 	}
 
-	lv_label_set_text_fmt(vol_label, "%d", percent);
+	// The ported voltage readout (off by default) replaces the index with a
+	// socket voltage when the user asks for it; index mode stays byte-identical.
+	// A voltage is up to six characters: on the 240 px panel the 24 px rung
+	// would run into the centred clock, so the compact profile uses the 16 px
+	// rung and a tighter group only while the reading is in volts.
+	bool compact_volts = volumereadout_form() != VOLUMEREADOUT_FORM_INDEX && bp_is_compact();
+	lv_obj_set_style_text_font(vol_label, compact_volts ? &font_ui_16 : &font_ui_24, 0);
+	lv_obj_set_style_pad_gap(container_left, compact_volts ? bp_pick(2, 4) : 8, 0);
+
+	char vol_text[VOLUMEREADOUT_TEXT_MAX];
+	volumereadout_text(percent, vol_text, sizeof(vol_text));
+	lv_label_set_text(vol_label, vol_text);
 
 	// Past this threshold the number turns red, warning that the next steps are
 	// the loud ones. The volume pop-up uses the same threshold.

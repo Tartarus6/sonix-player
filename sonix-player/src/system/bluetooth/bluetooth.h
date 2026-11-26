@@ -108,6 +108,14 @@ bool bluetooth_scan_running(void);
 void bluetooth_refresh(void);
 
 void bluetooth_pair(const char *mac);
+// A pairing that needs the user: enter a PIN/passkey, confirm a passkey, or
+// see a displayed passkey. mode: 0=input PIN, 1=input passkey, 2=confirm, 3=display.
+bool bluetooth_pin_pending(void);
+const char *bluetooth_pin_pending_device(void);
+int bluetooth_pin_mode(void);
+const char *bluetooth_pin_display(void);
+void bluetooth_submit_pin(const char *pin);
+void bluetooth_cancel_pin(void);
 void bluetooth_connect(const char *mac);
 void bluetooth_disconnect(const char *mac);
 void bluetooth_forget(const char *mac);
@@ -227,6 +235,12 @@ const char *bluetooth_ldac_quality(void);
 // a daemon that is gone: whoever plays has to open it again.
 unsigned bluetooth_output_generation(void);
 void bluetooth_set_ldac_quality(const char *mode);
+
+// Phone identity for a car head unit versus an ordinary audio device. Changing
+// it restarts the Bluetooth stack and reconnects the last device.
+bool bluetooth_car_mode_get(void);
+bool bluetooth_car_mode_restarting(void);
+void bluetooth_car_mode_set(bool on);
 
 // ---------------------------------------------------------------------------
 // The other direction: a device streaming to this one
