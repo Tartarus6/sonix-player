@@ -1,3 +1,16 @@
+/*
+ * Interactive Power Menu v1.1.0
+ * Modified by navitanh-hash, November 24, 2026.
+ *
+ * Changes: animated gesture guidance, seamless gesture
+ * takeover, independent slider animation and double
+ * spring rebound after automatic and manual movement.
+ *
+ * Distributed under the GNU General Public License v3,
+ * subject to the original project's licensing terms.
+ * See LICENSE.
+ */
+
 #include "powermenu.h"
 
 #include <stdio.h>
@@ -36,6 +49,26 @@
 // How far along (as a fraction of the track) the knob has to be on release.
 #define SLIDE_COMMIT_PCT 88
 
+// Visual-only alternating knob animation.
+#define GHOST_FORWARD_MS 600
+#define GHOST_RETURN_MS 105
+#define GHOST_FIRST_BOUNCE_MS 160
+#define GHOST_FIRST_BOUNCE_PX 16
+#define GHOST_BOUNCE_MS 95
+#define GHOST_BOUNCE_PX 4
+#define GHOST_DURATION_MS (GHOST_FORWARD_MS + GHOST_RETURN_MS + GHOST_FIRST_BOUNCE_MS + GHOST_BOUNCE_MS)
+#define GHOST_INITIAL_DELAY_MS 500
+#define GHOST_REBOOT_DELAY_MS 2100
+#define GHOST_CYCLE_MS 4200
+#define GHOST_TIMER_MS 16
+#define GHOST_NUDGE_PX 94
+#define GHOST_MAX_OPA 0
+#define GESTURE_RETURN_MS 220
+#define GESTURE_MIN_DRAG_PX 12
+
+#define SLIDE_LABEL_LEFT 105
+#define SLIDE_LABEL_RIGHT 20
+
 // Horizontal inset of the knob's travel: LVGL runs the knob's CENTRE from
 // edge to edge, which hangs half of it outside the pill at both ends. Padding
 // the track by half a knob (plus a hair of margin) keeps it inside.
@@ -48,14 +81,28 @@ static lv_obj_t *panel;
 typedef struct {
 	lv_obj_t *pill; // the visible track
 	lv_obj_t *slider;
-	lv_obj_t *knob_icon;
+	lv_obj_t *ghost_knob;
+        lv_obj_t *ghost_ring;
+        lv_obj_t *knob_icon;
 	int knob_icon_w; // real bitmap width: the two action icons are 56 px
 	lv_obj_t *label;
 	void (*action)(void);
+    bool dragging;
+    bool returning;
+    bool skip_demo;
+    int32_t visual_offset;
+    int32_t drag_anchor;
+    int32_t press_x;
+    int32_t return_from;
+    uint32_t return_tick;
+    lv_indev_t *drag_indev;
 } slide_t;
 
 static slide_t slide_off;
 static slide_t slide_reboot;
+
+static lv_timer_t *ghost_timer = NULL;
+static uint32_t ghost_start_tick = 0;
 
 bool powermenu_is_open(void) { return panel && !lv_obj_is_hidden(panel); }
 
@@ -64,6 +111,278 @@ bool powermenu_is_open(void) { return panel && !lv_obj_is_hidden(panel); }
 // ---------------------------------------------------------------------------
 
 static void slide_reset(slide_t *s);
+
+static void knob_render(slide_t *s,
+                        int32_t offset,
+                        bool fade_label) {
+    const int32_t travel = SLIDE_WIDTH - SLIDE_HEIGHT;
+    const int32_t home = (SLIDE_HEIGHT - SLIDE_KNOB) / 2;
+
+    if (offset < 0) offset = 0;
+    if (offset > travel) offset = travel;
+
+    s->visual_offset = offset;
+
+    lv_obj_align(s->ghost_knob, LV_ALIGN_LEFT_MID,
+                 home + offset, 0);
+
+    lv_obj_set_hidden(s->ghost_knob, false);
+    lv_obj_set_hidden(s->ghost_ring, true);
+    lv_obj_set_hidden(s->knob_icon, true);
+
+    lv_obj_set_style_bg_opa(
+        s->slider, LV_OPA_TRANSP, LV_PART_KNOB);
+
+    lv_obj_set_style_shadow_opa(
+        s->slider, LV_OPA_TRANSP, LV_PART_KNOB);
+
+    lv_opa_t opa = LV_OPA_COVER;
+
+    if (fade_label) {
+        opa = (lv_opa_t)(
+            LV_OPA_COVER -
+            LV_OPA_COVER * offset / travel);
+    }
+
+    lv_obj_set_style_opa(s->label, opa, 0);
+}
+
+static void ghost_hide(slide_t *s) {
+    if (!s->ghost_knob) return;
+    knob_render(s, 0, false);
+}
+
+// Integer smoothstep.
+static int32_t ghost_ease(int32_t t) {
+    return (int32_t)(
+        (int64_t)t * t * (3000 - 2 * t) / 1000000
+    );
+}
+
+static void ghost_draw(slide_t *s, int32_t elapsed) {
+    if (!s->ghost_knob || !s->ghost_ring) {
+        return;
+    }
+
+    if (s->dragging) return;
+
+    if (s->returning) {
+        uint32_t dt = lv_tick_elaps(s->return_tick);
+
+        const uint32_t total =
+            GESTURE_RETURN_MS +
+            GHOST_FIRST_BOUNCE_MS +
+            GHOST_BOUNCE_MS;
+
+        int32_t first_amp = GHOST_FIRST_BOUNCE_PX;
+        int32_t second_amp = GHOST_BOUNCE_PX;
+
+        // Scale rebounds for very short gestures.
+        // A stationary tap produces no artificial bounce.
+        if (s->return_from < GHOST_NUDGE_PX) {
+            first_amp =
+                first_amp * s->return_from / GHOST_NUDGE_PX;
+
+            second_amp =
+                second_amp * s->return_from / GHOST_NUDGE_PX;
+        }
+
+        if (s->return_from <= 0 || dt >= total) {
+            s->returning = false;
+            knob_render(s, 0, false);
+            return;
+        }
+
+        int32_t offset;
+
+        if (dt < GESTURE_RETURN_MS) {
+            // Accelerating return toward the home position.
+            int32_t t =
+                dt * 1000 / GESTURE_RETURN_MS;
+
+            offset =
+                s->return_from *
+                (1000 - t * t / 1000) / 1000;
+
+        } else if (
+            dt < GESTURE_RETURN_MS +
+                 GHOST_FIRST_BOUNCE_MS
+        ) {
+            // First elastic rebound.
+            int32_t t =
+                (dt - GESTURE_RETURN_MS) *
+                1000 / GHOST_FIRST_BOUNCE_MS;
+
+            int32_t bounce =
+                4 * t * (1000 - t) / 1000;
+
+            offset =
+                (first_amp * bounce + 500) / 1000;
+
+        } else {
+            // Second damped rebound.
+            int32_t t =
+                (dt - GESTURE_RETURN_MS -
+                 GHOST_FIRST_BOUNCE_MS) *
+                1000 / GHOST_BOUNCE_MS;
+
+            int32_t bounce =
+                4 * t * (1000 - t) / 1000;
+
+            offset =
+                (second_amp * bounce + 500) / 1000;
+        }
+
+        knob_render(s, offset, true);
+        return;
+    }
+
+    if (elapsed < 0 || elapsed >= GHOST_DURATION_MS) {
+        s->skip_demo = false;
+        ghost_hide(s);
+        return;
+    }
+
+    if (s->skip_demo) {
+        ghost_hide(s);
+        return;
+    }
+
+    int32_t offset;
+    int32_t progress;
+
+    if (elapsed <= GHOST_FORWARD_MS) {
+        // Original smooth forward movement.
+        int32_t t =
+            elapsed * 1000 / GHOST_FORWARD_MS;
+
+        progress = ghost_ease(t);
+
+        offset =
+            GHOST_NUDGE_PX * progress / 1000;
+
+    } else if (
+        elapsed < GHOST_FORWARD_MS + GHOST_RETURN_MS
+    ) {
+        // Accelerating spring release.
+        int32_t t =
+            (elapsed - GHOST_FORWARD_MS)
+            * 1000 / GHOST_RETURN_MS;
+
+        progress = 1000 - t * t / 1000;
+
+        offset =
+            GHOST_NUDGE_PX * progress / 1000;
+
+    } else if (
+        elapsed < GHOST_FORWARD_MS
+                + GHOST_RETURN_MS
+                + GHOST_FIRST_BOUNCE_MS
+    ) {
+        // First, stronger elastic rebound.
+        int32_t t =
+            (elapsed - GHOST_FORWARD_MS
+             - GHOST_RETURN_MS)
+            * 1000 / GHOST_FIRST_BOUNCE_MS;
+
+        int32_t bounce =
+            4 * t * (1000 - t) / 1000;
+
+        offset =
+            (GHOST_FIRST_BOUNCE_PX * bounce + 500) / 1000;
+
+        progress =
+            offset * 1000 / GHOST_NUDGE_PX;
+
+    } else {
+        // Second, smaller damped rebound.
+        int32_t t =
+            (elapsed - GHOST_FORWARD_MS
+             - GHOST_RETURN_MS
+             - GHOST_FIRST_BOUNCE_MS)
+            * 1000 / GHOST_BOUNCE_MS;
+
+        int32_t bounce =
+            4 * t * (1000 - t) / 1000;
+
+        offset =
+            (GHOST_BOUNCE_PX * bounce + 500) / 1000;
+
+        progress =
+            offset * 1000 / GHOST_NUDGE_PX;
+    }
+
+    knob_render(s, offset, false);
+}
+
+static void ghost_timer_cb(lv_timer_t *timer) {
+    (void)timer;
+
+    if (!powermenu_is_open()) {
+        return;
+    }
+
+    int32_t phase =
+        lv_tick_elaps(ghost_start_tick) % GHOST_CYCLE_MS;
+
+    ghost_draw(&slide_off, phase - GHOST_INITIAL_DELAY_MS);
+
+    ghost_draw(
+        &slide_reboot,
+        phase - GHOST_INITIAL_DELAY_MS - GHOST_REBOOT_DELAY_MS
+    );
+}
+
+static void ghost_stop(void) {
+    if (ghost_timer) {
+        lv_timer_delete(ghost_timer);
+        ghost_timer = NULL;
+    }
+
+    slide_off.dragging = false;
+    slide_off.returning = false;
+    slide_off.skip_demo = false;
+    slide_off.drag_indev = NULL;
+
+    slide_reboot.dragging = false;
+    slide_reboot.returning = false;
+    slide_reboot.skip_demo = false;
+    slide_reboot.drag_indev = NULL;
+
+    ghost_hide(&slide_off);
+    ghost_hide(&slide_reboot);
+}
+
+static void ghost_start(void) {
+    ghost_stop();
+
+    if (!powermenu_is_open()) {
+        return;
+    }
+
+    ghost_start_tick = lv_tick_get();
+
+    ghost_timer = lv_timer_create(
+        ghost_timer_cb,
+        GHOST_TIMER_MS,
+        NULL
+    );
+}
+
+static void ghost_panel_delete_cb(lv_event_t *e) {
+    (void)e;
+
+    if (ghost_timer) {
+        lv_timer_delete(ghost_timer);
+        ghost_timer = NULL;
+    }
+
+    slide_off.ghost_knob = NULL;
+    slide_reboot.ghost_knob = NULL;
+    slide_off.ghost_ring = NULL;
+    slide_reboot.ghost_ring = NULL;
+    panel = NULL;
+}
 
 void powermenu_show(void) {
 	if (!panel) {
@@ -76,9 +395,11 @@ void powermenu_show(void) {
 	lv_obj_set_hidden(panel, false);
 	lv_obj_move_foreground(panel);
 	power_hold_screen_on(true);
+        ghost_start();
 }
 
 static void hide(void) {
+        ghost_stop();
 	if (panel) {
 		lv_obj_set_hidden(panel, true);
 	}
@@ -97,11 +418,23 @@ void powermenu_request_show(void) { gui_post(async_show_cb, NULL); }
 // written lazily, and a DAP that loses them on every shutdown would be worse
 // than one that takes an extra moment to stop.
 static void do_power_off(void) {
+#ifdef HOST_BUILD
+        printf("[HOST TEST] Power off confirmed.\\n");
+        hide();
+        return;
+#endif
+
 	printf("power: shutting down\n");
 	power_shutdown();
 }
 
 static void do_reboot(void) {
+#ifdef HOST_BUILD
+        printf("[HOST TEST] Restart confirmed.\\n");
+        hide();
+        return;
+#endif
+
 	printf("power: rebooting\n");
 	device_state_remember_flush();
 	clock_shutdown();
@@ -160,21 +493,84 @@ static void slide_reset(slide_t *s) {
 }
 
 static void slide_event_cb(lv_event_t *e) {
-	slide_t *s = lv_event_get_user_data(e);
-	lv_event_code_t code = lv_event_get_code(e);
+    slide_t *s = lv_event_get_user_data(e);
+    lv_event_code_t code = lv_event_get_code(e);
 
-	if (code == LV_EVENT_VALUE_CHANGED) {
-		slide_track_knob(s);
-		return;
-	}
+    if (!powermenu_is_open()) return;
 
-	if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-		if (lv_slider_get_value(s->slider) >= SLIDE_COMMIT_PCT) {
-			s->action();
-		} else {
-			slide_reset(s); // not far enough: snap home
-		}
-	}
+    const int32_t travel = SLIDE_WIDTH - SLIDE_HEIGHT;
+
+    if (code == LV_EVENT_PRESSED) {
+        lv_indev_t *indev = lv_indev_active();
+
+        if (!indev || s->dragging) return;
+
+        if (lv_indev_get_type(indev) !=
+                LV_INDEV_TYPE_POINTER) return;
+
+        lv_point_t point;
+        lv_indev_get_point(indev, &point);
+
+        s->dragging = true;
+        s->returning = false;
+        s->skip_demo = true;
+        s->drag_indev = indev;
+        s->press_x = point.x;
+
+        s->drag_anchor =
+            point.x - s->visual_offset;
+
+        return;
+    }
+
+    if (!s->dragging) return;
+
+    if (code == LV_EVENT_PRESSING) {
+        if (lv_indev_active() != s->drag_indev)
+            return;
+
+        lv_point_t point;
+        lv_indev_get_point(s->drag_indev, &point);
+
+        knob_render(
+            s, point.x - s->drag_anchor, true);
+
+        return;
+    }
+
+    if (code == LV_EVENT_RELEASED ||
+        code == LV_EVENT_PRESS_LOST) {
+
+        bool commit = false;
+
+        if (code == LV_EVENT_RELEASED &&
+            s->drag_indev &&
+            lv_indev_active() == s->drag_indev) {
+
+            lv_point_t point;
+            lv_indev_get_point(s->drag_indev, &point);
+
+            commit =
+                point.x - s->press_x >=
+                    GESTURE_MIN_DRAG_PX &&
+                s->visual_offset * 100 >=
+                    travel * SLIDE_COMMIT_PCT;
+        }
+
+        s->dragging = false;
+        s->drag_indev = NULL;
+
+        if (commit) {
+            ghost_stop();
+            s->action();
+            return;
+        }
+
+        s->return_from = s->visual_offset;
+        s->return_tick = lv_tick_get();
+        s->returning = true;
+        s->skip_demo = true;
+    }
 }
 
 // One pill: a rounded container carrying the hint text, with a transparent
@@ -200,7 +596,29 @@ static void make_slide(lv_obj_t *parent, slide_t *s, const lv_image_dsc_t *icon,
 	lv_label_set_text(s->label, tr(text));
 	lv_obj_set_style_text_font(s->label, &font_ui_24, 0);
 	lv_obj_set_style_text_color(s->label, lv_color_white(), 0);
-	lv_obj_center(s->label);
+	lv_obj_set_width(
+                s->label,
+                SLIDE_WIDTH - SLIDE_LABEL_LEFT
+                    - SLIDE_LABEL_RIGHT
+        );
+
+        lv_label_set_long_mode(
+                s->label,
+                LV_LABEL_LONG_DOT
+        );
+
+        lv_obj_set_style_text_align(
+                s->label,
+                LV_TEXT_ALIGN_LEFT,
+                0
+        );
+
+        lv_obj_align(
+                s->label,
+                LV_ALIGN_LEFT_MID,
+                SLIDE_LABEL_LEFT,
+                0
+        );
 
 	// The working part: invisible track, white disc knob.
 	s->slider = lv_slider_create(s->pill);
@@ -228,14 +646,15 @@ static void make_slide(lv_obj_t *parent, slide_t *s, const lv_image_dsc_t *icon,
 	// prevent. With ADV_HITTEST the slider only answers a press that begins on
 	// the knob, so the value can only be dragged to the end. A tap on the rest
 	// of the pill does nothing.
-	lv_obj_set_adv_hittest(s->slider, true);
+	lv_obj_set_clickable(s->slider, false);
 	// The knob stays easy to grab: the extended area applies to its hit-test,
 	// not to the track.
 	lv_obj_set_ext_click_area(s->slider, SLIDE_HEIGHT / 2);
 
-	lv_obj_add_event_cb(s->slider, slide_event_cb, LV_EVENT_VALUE_CHANGED, s);
-	lv_obj_add_event_cb(s->slider, slide_event_cb, LV_EVENT_RELEASED, s);
-	lv_obj_add_event_cb(s->slider, slide_event_cb, LV_EVENT_PRESS_LOST, s);
+
+
+
+
 
 	// The icon rides the knob, drawn in the pill's coordinate space (the knob
 	// itself cannot hold children).
@@ -250,11 +669,122 @@ static void make_slide(lv_obj_t *parent, slide_t *s, const lv_image_dsc_t *icon,
 	lv_obj_set_style_image_recolor_opa(s->knob_icon, LV_OPA_COVER, 0);
 	lv_obj_set_ignore_layout(s->knob_icon, true);
 
-	slide_track_knob(s);
+        // Transparent outline ahead of the moving knob.
+        s->ghost_ring = lv_obj_create(s->pill);
+
+        lv_obj_remove_style_all(s->ghost_ring);
+        lv_obj_set_size(
+            s->ghost_ring, SLIDE_KNOB, SLIDE_KNOB
+        );
+        lv_obj_set_style_radius(
+            s->ghost_ring, LV_RADIUS_CIRCLE, 0
+        );
+        lv_obj_set_style_bg_opa(
+            s->ghost_ring, LV_OPA_TRANSP, 0
+        );
+        lv_obj_set_style_border_width(
+            s->ghost_ring, 2, 0
+        );
+        lv_obj_set_style_border_color(
+            s->ghost_ring, lv_color_white(), 0
+        );
+        lv_obj_set_style_border_opa(
+            s->ghost_ring, LV_OPA_TRANSP, 0
+        );
+        lv_obj_set_style_pad_all(s->ghost_ring, 0, 0);
+        lv_obj_set_clickable(s->ghost_ring, false);
+        lv_obj_set_scrollable(s->ghost_ring, false);
+        lv_obj_set_ignore_layout(s->ghost_ring, true);
+        lv_obj_set_hidden(s->ghost_ring, true);
+
+        // Visual-only copy of the original white knob.
+        s->ghost_knob = lv_obj_create(s->pill);
+
+        lv_obj_remove_style_all(s->ghost_knob);
+        lv_obj_set_size(
+            s->ghost_knob, SLIDE_KNOB, SLIDE_KNOB
+        );
+        lv_obj_set_style_radius(
+            s->ghost_knob, LV_RADIUS_CIRCLE, 0
+        );
+        lv_obj_set_style_bg_color(
+            s->ghost_knob, lv_color_white(), 0
+        );
+        lv_obj_set_style_bg_opa(
+            s->ghost_knob, LV_OPA_COVER, 0
+        );
+        lv_obj_set_style_shadow_width(
+            s->ghost_knob, 10, 0
+        );
+        lv_obj_set_style_shadow_opa(
+            s->ghost_knob, LV_OPA_40, 0
+        );
+        lv_obj_set_style_shadow_color(
+            s->ghost_knob, lv_color_black(), 0
+        );
+
+        lv_obj_set_style_pad_all(s->ghost_knob, 0, 0);
+        lv_obj_set_clickable(s->ghost_knob, true);
+    lv_obj_add_flag(
+        s->ghost_knob, LV_OBJ_FLAG_PRESS_LOCK);
+
+    lv_obj_add_event_cb(
+        s->ghost_knob, slide_event_cb,
+        LV_EVENT_PRESSED, s);
+
+    lv_obj_add_event_cb(
+        s->ghost_knob, slide_event_cb,
+        LV_EVENT_PRESSING, s);
+
+    lv_obj_add_event_cb(
+        s->ghost_knob, slide_event_cb,
+        LV_EVENT_RELEASED, s);
+
+    lv_obj_add_event_cb(
+        s->ghost_knob, slide_event_cb,
+        LV_EVENT_PRESS_LOST, s);
+        lv_obj_set_scrollable(s->ghost_knob, false);
+        lv_obj_set_ignore_layout(s->ghost_knob, true);
+
+        lv_obj_t *ghost_icon =
+            lv_image_create(s->ghost_knob);
+
+        lv_image_set_src(ghost_icon, icon);
+        lv_image_set_scale(ghost_icon, 200);
+
+        lv_obj_set_style_image_recolor(
+            ghost_icon, icon_tint, 0
+        );
+        lv_obj_set_style_image_recolor_opa(
+            ghost_icon, LV_OPA_COVER, 0
+        );
+
+        lv_obj_set_clickable(ghost_icon, false);
+        lv_obj_set_scrollable(ghost_icon, false);
+        lv_obj_center(ghost_icon);
+
+        lv_obj_align(
+            s->ghost_knob,
+            LV_ALIGN_LEFT_MID,
+            (SLIDE_HEIGHT - SLIDE_KNOB) / 2,
+            0
+        );
+
+        lv_obj_set_clickable(s->knob_icon, false);
+
+    slide_track_knob(s);
+    knob_render(s, 0, false);
 }
 
 void powermenu_init(gui_config_t *cfg) {
 	panel = lv_obj_create(lv_layer_top());
+
+        lv_obj_add_event_cb(
+                panel,
+                ghost_panel_delete_cb,
+                LV_EVENT_DELETE,
+                NULL
+        );
 	lv_obj_set_size(panel, cfg->screen_width, cfg->screen_height);
 	lv_obj_align(panel, LV_ALIGN_TOP_LEFT, 0, 0);
 	// Nearly-opaque black: the page underneath is still just visible, but the
