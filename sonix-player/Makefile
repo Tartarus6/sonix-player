@@ -229,11 +229,19 @@ HOST_OBJS = $(APP_SRCS:src/%.c=build_host/%.o) $(APP_CXX_SRCS:src/%.cpp=build_ho
 TARGET_OBJS = $(APP_SRCS:src/%.c=build_target/%.o) $(APP_CXX_SRCS:src/%.cpp=build_target/%.opp) \
 			  $(LVGL_SRCS:$(LVGL_DIR)/%.c=build_target/lvgl/%.o)
 
-.PHONY: all host target clean compile_commands.json
+.PHONY: all host target test-lang-sort clean compile_commands.json
 
 all: host compile_commands.json
 
 host: $(HOST_BIN) compile_commands.json
+
+# Host check for the language list. The test supplies its own main and stubs
+# the five display helpers that main.c defines, so main.o stays out.
+test-lang-sort: $(HOST_BIN)
+	$(CC) $(HOST_CFLAGS) -c tests/lang_sort_test.c -o build_host/lang_sort_test.o
+	$(HOST_LD) -o build_host/lang_sort_test \
+		build_host/lang_sort_test.o $(filter-out build_host/main.o,$(HOST_OBJS)) $(HOST_LDFLAGS)
+	build_host/lang_sort_test
 
 $(HOST_BIN): $(HOST_OBJS)
 	$(HOST_LD) -o $@ $(HOST_OBJS) $(HOST_LDFLAGS)

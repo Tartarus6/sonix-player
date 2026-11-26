@@ -256,7 +256,6 @@ void language_init(gui_config_t *cfg) {
 	const char *names[MAX_LANGUAGES];
 	int found = lang_list(names);
 
-	// TODO: it'd probably be a good idea to sort the languages. i think each update might change the order they display in, and it isn't alphabetical (probably do this in lang.c idk)
 	for (int i = 0; i < found; i++) {
 		snprintf(entries[i].name, sizeof(entries[0].name), "%s", names[i]);
 		// The files the stock firmware ships are named like

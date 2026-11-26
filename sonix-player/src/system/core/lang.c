@@ -5,6 +5,7 @@
 #include "lvgl/src/widgets/roller/lv_roller_private.h"
 
 #include "src/system/core/config.h"
+#include "src/system/library/library.h"
 
 #include "lvgl/lvgl.h"
 #include "lvgl/src/display/lv_display_private.h"
@@ -413,6 +414,23 @@ const char *lang_current(void) { return current; }
 
 static bool read_declared_name(const char *name, char *out, size_t size);
 
+// The library already defines the order a list should have: accents fold to
+// their base letter and scripts group together. Reuse it instead of keeping a
+// second collation here. We key on the file name rather than the decoded
+// label, because the saved choice stores the file name. Equal keys fall back
+// to the raw name so that two spellings of one language do not swap places
+// between directory reads. The collation also drops leading articles,
+// following the music setting.
+static int name_order(const void *a, const void *b) {
+	const char *x = *(const char *const *)a;
+	const char *y = *(const char *const *)b;
+	char kx[LIBRARY_SORT_KEY_MAX], ky[LIBRARY_SORT_KEY_MAX];
+	library_sort_key(x, kx, sizeof(kx));
+	library_sort_key(y, ky, sizeof(ky));
+	int order = strcmp(kx, ky);
+	return order ? order : strcmp(x, y);
+}
+
 int lang_list(const char **names) {
 	// Whatever .ini files are in the folder, and nothing else. Dropping a new
 	// one in is all it takes to add a language: the list is the directory.
@@ -476,6 +494,7 @@ int lang_list(const char **names) {
 		count++;
 	}
 	closedir(d);
+	qsort(names, (size_t)count, sizeof(*names), name_order);
 	return count;
 }
 
