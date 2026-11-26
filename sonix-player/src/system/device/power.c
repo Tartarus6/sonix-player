@@ -8,6 +8,7 @@
 // getter, and both places here have to read the period before changing it.
 #include "lvgl/src/misc/lv_timer_private.h"
 
+#include "src/gui/library/browser.h"
 #include "src/system/audio/waveform.h"
 #include "src/system/device/ota.h"
 #include "src/system/device/system.h"
@@ -1021,6 +1022,10 @@ void power_shutdown(void) {
 	// position seeked to while paused, which changes no state at all, would
 	// never be written.
 	device_state_remember_flush();
+
+	// And where the file browser had got to: its scroll is written on a debounce
+	// too, and the page is not unloaded on the way down.
+	browser_state_flush();
 
 	// The time goes into the RTC before anything else, exactly as the stock
 	// player does on its way out: whatever the clock has learned since it was

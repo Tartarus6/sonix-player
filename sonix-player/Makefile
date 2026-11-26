@@ -392,6 +392,18 @@ build_target/lvgl/%.o: $(LVGL_DIR)/%.c $(TARGET_FLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	$(CROSS_CC) $(TARGET_CFLAGS) $(TARGET_OPT) -c $< -o $@
 
+# The browser state format is plain POSIX, so its test needs no LVGL or audio.
+.PHONY: test-browserstate
+test-browserstate:
+	@mkdir -p build_tests
+	$(CC) -O2 -g -Wall -I. -o build_tests/browserstate_test tests/browserstate_test.c src/gui/library/browserstate.c
+	./build_tests/browserstate_test
+
+# Headless regression for the "go up after a restart" report on PR #281.
+.PHONY: test-browser-go-up
+test-browser-go-up: $(HOST_BIN)
+	python3 tests/browser_go_up_after_restart.py --host ./$(HOST_BIN)
+
 # For the Zed/clangd LSP: autofill and hover popups.
 compile_commands.json:
 	@python3 generate_compile_commands.py

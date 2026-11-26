@@ -10,6 +10,7 @@
 
 #include "src/gui/shell/gui.h"
 #include "src/gui/fonts/fonts.h"
+#include "src/gui/library/browser.h"
 #include "src/gui/shell/icons.h"
 #include "src/gui/shell/theme.h"
 #include "src/system/device/clock.h"
@@ -104,6 +105,7 @@ static void do_power_off(void) {
 static void do_reboot(void) {
 	printf("power: rebooting\n");
 	device_state_remember_flush();
+	browser_state_flush();
 	clock_shutdown();
 	radio_store_close();
 	qobuzcache_clear_on_exit();

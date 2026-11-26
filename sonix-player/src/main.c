@@ -72,6 +72,11 @@
 #include "src/system/net/webcgi.h"
 #include "src/system/net/wifi.h"
 
+#ifdef HOST_BUILD
+#include "src/gui/library/browser.h"
+#include "src/gui/shell/switcher.h"
+#endif
+
 
 static volatile sig_atomic_t running = 1;
 
@@ -84,6 +89,55 @@ static void host_shot_poll_cb(lv_timer_t *timer) {
 	if (access("/tmp/sonix/shot", F_OK) == 0) {
 		remove("/tmp/sonix/shot");
 		screenshot_request();
+	}
+}
+
+// Opens the file browser on the simulator without a finger, for the headless
+// tests: SONIX_OPEN_BROWSER=1 switches to it once "remember track" has had its
+// moment, exactly as tapping Browse would. SONIX_BROWSER_OPEN_DIR goes on to
+// open a folder as a tap would, and SONIX_BROWSER_SCROLL scrolls the listing a
+// second later, so the debounced write can be checked too.
+static void host_browser_scroll_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	const char *scroll = getenv("SONIX_BROWSER_SCROLL");
+	if (scroll) {
+		browser_test_scroll(atoi(scroll));
+	}
+	// Entering the child right after the scroll builds the same ancestor stack
+	// a real tap on a folder row would build.
+	const char *child = getenv("SONIX_BROWSER_OPEN_CHILD");
+	if (child && child[0]) {
+		browser_test_open_child(child);
+	}
+}
+static void host_browser_refresh_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	browser_refresh();
+}
+static void host_browser_go_up_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	browser_go_up();
+}
+static void host_open_browser_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	switch_screen(browser_screen);
+	const char *dir = getenv("SONIX_BROWSER_OPEN_DIR");
+	if (dir && dir[0]) {
+		browser_open_dir_public(dir);
+	}
+	if (getenv("SONIX_BROWSER_SCROLL")) {
+		lv_timer_create(host_browser_scroll_cb, 1500, NULL);
+	}
+	// Walk back up without a finger: the back button and the swipe both call
+	// the same public function.
+	const char *go_up = getenv("SONIX_BROWSER_GO_UP_MS");
+	if (go_up) {
+		lv_timer_create(host_browser_go_up_cb, atoi(go_up), NULL);
+	}
+	// Re-read the page without a user action: what a late-mounted card does.
+	const char *refresh = getenv("SONIX_BROWSER_REFRESH_MS");
+	if (refresh) {
+		lv_timer_create(host_browser_refresh_cb, atoi(refresh), NULL);
 	}
 }
 #endif
@@ -2293,6 +2347,9 @@ int main(int argc, char **argv) {
 
 #ifdef HOST_BUILD
 	lv_timer_create(host_shot_poll_cb, 200, NULL); // see host_shot_poll_cb
+	if (getenv("SONIX_OPEN_BROWSER")) {
+		lv_timer_create(host_open_browser_cb, 1500, NULL);
+	}
 #endif
 
 	// The media player bluez shows to the headphones. After gui_init, because

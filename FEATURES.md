@@ -23,7 +23,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 > Scan the library from Settings > Music. You choose which folders of the card are scanned.
 
 - **Main page** - All tracks, Albums, Artists, Album artists, Genres, Years, Favourites, Most played, Playlists and Browse. You can rearrange the tiles and hide the ones you don't use.
-- **Browse** - go through the folders of the card as they are.
+- **Browse** - go through the folders of the card as they are. The browser remembers the folder and scroll position it was left at, and the scroll of the folders above it, so going back up after a restart lands where you left that folder; with nothing remembered it opens the restored track's folder when **Remember track** is on, then `Music`, then the card root.
 - **Search** across tracks, albums and artists.
 - **Sorting** - by name (A-Z or Z-A), by date added (newest or oldest first) or by year.
 - **A-Z bar** on the side when you scroll a long list.
