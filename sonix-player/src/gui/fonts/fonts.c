@@ -12,6 +12,7 @@
 
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
+#include "src/gui/board_profile.h"
 
 // All text is drawn through LVGL's FreeType binding, from the faces the
 // firmware ships in FONT_DIR. One FT_Face per file serves however many sizes
@@ -145,7 +146,37 @@ static const text_step_t LARGE_STEPS[] = {
 
 static bool large_text;
 
+// On the V1's 240-pixel panel a named "24" font would take a tenth of the
+// screen width per word. The TempoTec fork remaps the named sizes to compact
+// rasters globally, which keeps every page's typographic hierarchy intact
+// without editing hundreds of &font_ui_24 call sites. The HiBy panels keep the
+// original sizes; bp_is_compact() answers from the device model.
+static int compact_size(int size) {
+	switch (size) {
+	case 14: return 14;
+	case 16: return 15;
+	case 18: return 15;
+	case 20: return 16;
+	case 22: return 16;
+	case 24: return 17;
+	case 26: return 18;
+	case 28: return 19;
+	case 32: return 21;
+	case 36: return 23;
+	case 64: return 32;
+	case 72: return 36;
+	default: return size;
+	}
+}
+
 static int drawn_size(int size, bool large) {
+	if (bp_is_compact()) {
+		int compact = compact_size(size);
+		if (large && compact <= 36) {
+			compact++;
+		}
+		return compact;
+	}
 	if (!large) {
 		return size;
 	}

@@ -18,6 +18,10 @@ typedef struct {
 	// actions but a choice between alternatives (Qobuz audio quality): there
 	// the current entry has to be visible.
 	bool checked;
+	// When true the label is already finished text (a formatted count, say)
+	// and must not be sent through tr() again. Existing callers leave it
+	// false, so their labels are translated exactly as before.
+	bool verbatim;
 } popover_item_t;
 
 // Builds the (hidden) veil and card once. Call from gui_init.

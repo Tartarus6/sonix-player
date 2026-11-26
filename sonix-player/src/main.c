@@ -19,6 +19,7 @@
 #include "src/gui/nowplaying/cover.h"
 #include "src/system/audio/waveform.h"
 #include "src/gui/fonts/fonts.h"
+#include "src/gui/board_profile.h"
 #include "src/gui/shell/gui.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/settings/powersettings.h"
@@ -84,6 +85,54 @@ static void host_shot_poll_cb(lv_timer_t *timer) {
 	if (access("/tmp/sonix/shot", F_OK) == 0) {
 		remove("/tmp/sonix/shot");
 		screenshot_request();
+	}
+}
+
+// Opens the file browser on the simulator without a finger, for the headless
+// tests: SONIX_OPEN_BROWSER=1 switches to it once "remember track" has had its
+// moment, exactly as tapping Browse would. SONIX_BROWSER_OPEN_DIR goes on to
+// open a folder as a tap would.
+#include "src/gui/library/browser.h"
+#include "src/gui/bluetooth/btsettings.h"
+#include "src/gui/shell/switcher.h"
+static void host_browser_refresh_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	browser_refresh();
+}
+// The Bluetooth page and its device menu, likewise for looking at layouts
+// without a mouse: SONIX_OPEN_BTSETTINGS=1, and SONIX_OPEN_BT_MENU=1 opens the
+// first paired device's menu a moment later.
+static void host_open_bt_menu_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	btsettings_host_open_device_menu();
+}
+static void host_open_consent_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	btsettings_host_show_consent();
+}
+
+static void host_open_btsettings_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	switch_screen(btsettings_screen);
+	if (getenv("SONIX_OPEN_BT_MENU")) {
+		lv_timer_create(host_open_bt_menu_cb, 1200, NULL);
+	}
+	if (getenv("SONIX_MOCK_CONSENT")) {
+		lv_timer_create(host_open_consent_cb, 1200, NULL);
+	}
+}
+
+static void host_open_browser_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	switch_screen(browser_screen);
+	const char *dir = getenv("SONIX_BROWSER_OPEN_DIR");
+	if (dir && dir[0]) {
+		browser_open_dir_public(dir);
+	}
+	// Re-read the page without a user action: what a late-mounted card does.
+	const char *refresh = getenv("SONIX_BROWSER_REFRESH_MS");
+	if (refresh) {
+		lv_timer_create(host_browser_refresh_cb, atoi(refresh), NULL);
 	}
 }
 #endif
@@ -1044,11 +1093,13 @@ static void tune_pointer(lv_indev_t *indev) {
 #define SCREEN_WIDTH 480
 #define SCREEN_HEIGHT 720
 
-// The smallest panel the pages can be laid out on. Comfortably under either
-// real one: this is not a size anybody should reach, it is the floor under
-// which the arithmetic in the pages stops meaning anything.
+// The smallest panel the regular (480-pixel) pages can be laid out on. The V1
+// has its own, smaller floor: applying the regular floor to it was the reason
+// the compact widget sizes never reached its framebuffer.
 #define PANEL_MIN_WIDTH 320
 #define PANEL_MIN_HEIGHT 480
+#define COMPACT_MIN_WIDTH 240
+#define COMPACT_MIN_HEIGHT 320
 
 // The panel size for gui_config_t, in this order: SONIX_PANEL ("480x800"); the
 // model named in system-info.json; the model whose panel exactly matches the
@@ -1077,11 +1128,17 @@ static void panel_size(int *width, int *height, int fb_w, int fb_h) {
 	// Whatever the answer came from, it has to be a panel this interface can be
 	// laid out on. The pages subtract a title row and a bar from the height in
 	// unsigned arithmetic, so anything shorter than that does not crowd the
-	// layout, it wraps: the fallback is the only safe answer.
-	if (*width < PANEL_MIN_WIDTH || *height < PANEL_MIN_HEIGHT) {
-		printf("panel: %dx%d is too small to lay out, using %dx%d\n", *width, *height, SCREEN_WIDTH, SCREEN_HEIGHT);
-		*width = SCREEN_WIDTH;
-		*height = SCREEN_HEIGHT;
+	// layout, it wraps: the fallback is the only safe answer. The V1's compact
+	// layouts are written for 240x320 and have their own floor.
+	const bool compact = bp_is_compact();
+	const int min_w = compact ? COMPACT_MIN_WIDTH : PANEL_MIN_WIDTH;
+	const int min_h = compact ? COMPACT_MIN_HEIGHT : PANEL_MIN_HEIGHT;
+	if (*width < min_w || *height < min_h) {
+		const int fallback_w = compact ? bp_screen_w() : SCREEN_WIDTH;
+		const int fallback_h = compact ? bp_screen_h() : SCREEN_HEIGHT;
+		printf("panel: %dx%d is too small to lay out, using %dx%d\n", *width, *height, fallback_w, fallback_h);
+		*width = fallback_w;
+		*height = fallback_h;
 	}
 }
 
@@ -2090,8 +2147,8 @@ int main(int argc, char **argv) {
 	gui_config_t gui_cfg = {
 		.screen_width = (uint32_t)panel_w,
 		.screen_height = (uint32_t)panel_h,
-		.top_bar_height = 44,
-		.padding = 15,
+		.top_bar_height = (int8_t)bp_status_bar_h(),
+		.padding = (int8_t)bp_padding(),
 #ifdef HOST_BUILD
 		.sd_root_path = music_path,
 #else
@@ -2293,6 +2350,12 @@ int main(int argc, char **argv) {
 
 #ifdef HOST_BUILD
 	lv_timer_create(host_shot_poll_cb, 200, NULL); // see host_shot_poll_cb
+	if (getenv("SONIX_OPEN_BROWSER")) {
+		lv_timer_create(host_open_browser_cb, 1500, NULL);
+	}
+	if (getenv("SONIX_OPEN_BTSETTINGS")) {
+		lv_timer_create(host_open_btsettings_cb, 1500, NULL);
+	}
 #endif
 
 	// The media player bluez shows to the headphones. After gui_init, because
