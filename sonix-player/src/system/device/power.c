@@ -1050,6 +1050,11 @@ void power_shutdown(void) {
 	// stored -- and a device put away at its charge limit would meet the next
 	// cable with a charger that does nothing.
 	power_charging_release();
+	// The R1's switch is a bit in its PMIC, not a charger sysfs node, and it
+	// survives a shutdown. Release it too before the power goes.
+	if (axpcharge_charging_control_supported()) {
+		axpcharge_charging_release();
+	}
 
 	// Last, after everything above that writes to the card: a library check
 	// running in the background is stopped, the databases closed and the card
@@ -1973,6 +1978,13 @@ void power_init(const power_config_t *cfg, lv_display_t *disp) {
 		park_secs = 15; // any lower and a pocket checked twice re-associates for nothing
 	}
 	g_radio_park_after_ms = (uint32_t)park_secs * 1000u;
+
+	// The PMIC's cell-charge bit can be left clear by a crash in DAC mode and
+	// the stock driver does not restore it. Put it back once at startup, before
+	// any tick can re-assert a stop.
+	if (axpcharge_charging_control_supported()) {
+		axpcharge_charging_release();
+	}
 
 	g_power_timer = lv_timer_create(power_timer_cb, POWER_TICK_MS, NULL);
 

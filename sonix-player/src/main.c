@@ -24,6 +24,7 @@
 #include "src/gui/settings/powersettings.h"
 #include "src/gui/settings/settings.h"
 #include "src/system/device/adb.h"
+#include "src/system/device/axpcharge.h"
 #include "src/system/audio/alsa-controls.h"
 #include "src/system/playback/sleeptimer.h"
 #include "src/system/audio/usbaudio.h"
@@ -482,8 +483,11 @@ static void crash_handler(int sig, siginfo_t *info, void *context) {
 	// The charger back on. The player is about to sit here doing nothing, and
 	// if it went down holding the charge limit the battery would never fill
 	// again -- the charger driver keeps that bit until the next boot. One write
-	// to one sysfs node, which is safe enough to do from here.
+	// to one sysfs node, which is safe enough to do from here. On the R1 there
+	// is no such node: the quiet variant trylocks and writes the PMIC bit
+	// without logging, and startup restores it if even the trylock loses.
 	power_charging_release();
+	axpcharge_charging_release_quiet();
 
 	for (;;) {
 		pause();

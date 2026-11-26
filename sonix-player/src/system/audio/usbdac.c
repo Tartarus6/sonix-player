@@ -5,6 +5,7 @@
 #include "src/system/audio/audio.h"
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
+#include "src/system/device/axpcharge.h"
 #include "src/system/device/power.h"
 #include "src/system/device/system.h"
 #include "src/system/device/usb.h"
@@ -406,17 +407,30 @@ static void gadget_teardown(void) {
 
 static void apply_charging(void) {
 	bool on = usbdac_charging_enabled();
+	bool blocked;
 
-	// power.c owns the charger. It stops charging through the driver's
-	// step-charging bit, which leaves the input path feeding the system -- so
-	// the player carries on running from the cable with the battery untouched,
-	// which is the whole point here.
-	power_set_charging_allowed(on);
+	if (axpcharge_charging_control_supported()) {
+		// The R1 has no MP2731: its AXP2101 PMIC is the charger, so the
+		// step-charging sysfs node power.c writes does not exist there.
+		// axpcharge.c clears REG18h[1] instead and reports what the PMIC
+		// confirmed, which is what the battery icon must follow.
+		if (!axpcharge_set_charging(on)) {
+			printf("usbdac: the PMIC did not take the charging change\n");
+		}
+		blocked = axpcharge_charging_blocked();
+	} else {
+		// power.c owns the charger on the other players. It stops charging
+		// through the driver's step-charging bit, which leaves the input path
+		// feeding the system -- so the player carries on running from the
+		// cable with the battery untouched, which is the whole point here.
+		power_set_charging_allowed(on);
+		blocked = !on;
+	}
 
 	// Say so where the user looks: with the charger off the battery icon and
 	// the LED must stop claiming a charge is happening.
-	system_suppress_charging(!on);
-	printf("usbdac: charging %s while in DAC mode\n", on ? "allowed" : "held off");
+	system_suppress_charging(blocked);
+	printf("usbdac: charging %s while in DAC mode\n", blocked ? "held off" : "allowed");
 }
 
 // The live answer, cached here rather than read back out of the config every
@@ -716,7 +730,13 @@ void usbdac_stop(void) {
 	}
 
 	// Leaving DAC mode gives the charger back, and the indication with it.
-	power_set_charging_allowed(true);
+	// A failed AXP release stays queued for the power tick; the MP2731 path
+	// writes its node straight away.
+	if (axpcharge_charging_control_supported()) {
+		axpcharge_charging_release();
+	} else {
+		power_set_charging_allowed(true);
+	}
 	system_suppress_charging(false);
 
 	gadget_teardown();
