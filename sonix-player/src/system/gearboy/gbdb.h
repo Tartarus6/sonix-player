@@ -30,6 +30,7 @@ typedef struct {
 	char path[GBROM_PATH_MAX]; // absolute path of the ROM
 	char name[GBROM_NAME_MAX]; // from the database, or the cleaned-up filename
 	char file[GBROM_NAME_MAX]; // the filename, for the second line
+	char cover_path[GBROM_PATH_MAX]; // resolved cover image, filled by the scan worker
 	uint32_t crc;
 	bool from_db; // true when the name came from the database
 	bool color;   // true when it sits in Games/GBC or ends in .gbc
