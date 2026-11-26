@@ -176,6 +176,9 @@ audio_status_t device_state_toggle_play_pause(void);
 
 void device_state_seek(double seconds);
 
+// A real seek for a held preview: no restart-on-stopped and no position note.
+void device_state_seek_hold(double seconds);
+
 // Called with the playing track's position and length, from the progress
 // poll. In the last seconds of a track, with gapless on, reads the next one
 // off the card ahead of time (readahead.h), so it opens in time to follow on
@@ -196,6 +199,9 @@ void device_state_read_ahead(double position, double total);
 // change: a position picked on one track means nothing on the next.
 void device_state_scrub_by(double delta);
 void device_state_scrub_commit(void);
+// The input thread calls this when a node disappears or a mode change
+// abandons a hold: discards any open scrub without performing the seek.
+void device_state_scrub_cancel(void);
 bool device_state_scrub_active(double *position_out);
 void device_state_stop(void);
 

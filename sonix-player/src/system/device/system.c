@@ -26,13 +26,16 @@
 #include "src/system/bluetooth/bluetooth.h"
 #include "src/system/bluetooth/btlog.h"
 #include "src/system/bluetooth/btplayer.h"
+#include "src/system/bluetooth/btreceiver.h"
 #include "src/system/audio/audio.h"
 #include "src/system/audio/alsa-controls.h"
 #include "src/system/playback/device_state.h"
+#include "src/system/playback/audiobook.h"
 #include "src/system/library/audiobookdb.h"
 #include "src/system/audio/eq.h"
 #include "src/system/remote/dlna.h"
 #include "src/system/gearboy/gbdb.h"
+#include "src/system/input/holdpreview.h"
 #include "src/system/input/hookclicks.h"
 #include "src/system/input/keymap.h"
 #include "src/system/core/panel.h"
@@ -1262,6 +1265,24 @@ void input_set_volume_step(int percent) {
 	volume_step_percent = percent;
 }
 
+// How far one step of a held skip key seeks, in seconds, kept per direction:
+// forward and back are separate settings (Settings > More > Seek steps). Read
+// by the key threads, written by the interface. A value below one second is
+// meaningless as a step, so it falls back to the default.
+static volatile int seek_back_seconds = 10;
+static volatile int seek_forward_seconds = 10;
+
+void input_set_seek_steps(int back, int forward) {
+	if (back < 1) {
+		back = 10;
+	}
+	if (forward < 1) {
+		forward = 10;
+	}
+	seek_back_seconds = back;
+	seek_forward_seconds = forward;
+}
+
 // One step up or down, as a signed change of the volume.
 static int volume_step_delta(int code) {
 	int step = volume_step_percent;
@@ -1478,13 +1499,131 @@ static bool mapped_action_repeats(keymap_button_t button) {
 // track change moves to the RELEASE: deciding it on the way down would change
 // track and then seek inside the new one, both from a single press.
 //
-// The step is deliberately coarse and constant. A ramp reads well on a screen
-// where the position is visible; with the player in a pocket, "so many seconds
-// per second" is the thing a thumb can aim with.
+// The step is deliberately coarse and constant for the whole hold: a ramp
+// reads well on a screen where the position is visible; with the player in a
+// pocket, "so many seconds per second" is the thing a thumb can aim with.
+// The size comes from the cached interval (keymap/music, or the book/podcast
+// setting), and Seek mode decides whether a short press already moves.
 // ---------------------------------------------------------------------------
 #define SEEK_HOLD_MS 500	 // held this long: it is a seek, not a skip
 #define SEEK_REPEAT_MS 250	 // and another step every quarter second
-#define SEEK_STEP_SECONDS 5.0
+
+// A seek whose release never arrives -- a lost value-0, or the node gone away
+// -- must not stay open for ever: after this long the scrub is committed and
+// the hold is dropped. A headset hold is re-armed by the driver's 200 ms
+// repeat, so its deadline only runs once the repeats stop. A case button has
+// no such evidence: the app owns its repeat timer, so the cap is long enough
+// that a deliberate hold is never cut short.
+#define SEEK_DEADLINE_HEADSET_MS 10000
+#define SEEK_DEADLINE_BUTTON_MS 60000
+
+// A headset hold whose deadline committed early: the remaining value-1 repeats
+// are the same physical hold, not a new one. If its release is lost the latch
+// is dropped after this long, so the button is not dead for the session.
+#define HEADSET_HOLD_CONSUMED_MS 5000
+
+// A held preview steps back by the cached interval, plays this long, then
+// steps again. The period allows for the flush and refill after a real seek;
+// the R1 log is what decides whether 950 ms actually gives 850 ms of sound.
+#define PREVIEW_PLAY_MS 850
+#define PREVIEW_PERIOD_MS 950
+
+static double seek_seconds(bool forward) {
+	return (double)(forward ? seek_forward_seconds : seek_back_seconds);
+}
+
+static seek_status_t preview_status(void) {
+	audio_status_t status = audio_get_status();
+	if (status == AUDIO_STATUS_PLAYING) {
+		return SEEK_STATUS_PLAYING;
+	}
+	if (status == AUDIO_STATUS_PAUSED) {
+		return SEEK_STATUS_PAUSED;
+	}
+	return SEEK_STATUS_STOPPED;
+}
+
+// The same note rule as device_state_scrub_commit(): a seek that landed on a
+// book or podcast moves the position the state keeper has written down.
+static void preview_note(const char *file, double pos, double total) {
+	device_state_t state;
+	device_state_get(&state);
+	if (strcmp(file, state.current_file) != 0) {
+		return;
+	}
+	if (audiobook_is_playing()) {
+		audiobook_note_position(pos, total, true);
+	} else if (podcastcache_is_episode(file)) {
+		podcaststate_note(file, pos, total, true);
+	}
+}
+
+// One line per step gives the R1 pass a cadence to measure. The play window is
+// logged too, so a log can say whether 950 ms was enough to hear 850 ms.
+static void log_preview_step(void) {
+	fprintf(stderr, "preview[%ld]: seek to %.2f s, play %d ms\n",
+			(long)now_ms(), holdpreview_position(), PREVIEW_PLAY_MS);
+}
+
+// ---------------------------------------------------------------------------
+// Seek mode
+//
+// With the skip mode set to "seek" (keymap.h), a skip gesture moves inside the
+// track instead of changing it, and holding play rewinds. The mode belongs to
+// the local transport alone: in Bluetooth receiver mode or while DLNA owns
+// playback the skip keys mean the phone or the cast, so the mode is off there.
+// ---------------------------------------------------------------------------
+
+// Whether Seek mode is in force right now: the setting is on AND the skip keys
+// belong to this player rather than a receiver session or a DLNA cast.
+static bool skip_mode_seek(void) {
+	return keymap_skip_mode() == SEEK_SKIP_SEEK &&
+		   seekpolicy_skip_mode_applies(btreceiver_is_active(), dlna_owns_playback());
+}
+
+// Whether this button, pressed now, is a seek key. Next and previous always
+// are in Seek mode; play is only when it still means play/pause (play-hold
+// rewind). The double click is sacred: its configured action is used verbatim
+// and is never reinterpreted by Seek mode, so an overridden button is never a
+// seek key.
+static bool seek_key_action(keymap_button_t button) {
+	if (button == override_button) {
+		return false;
+	}
+	if (!skip_mode_seek()) {
+		return false;
+	}
+	if (button == KEYMAP_BTN_PLAY) {
+		// Play-hold rewind only when the play button is actually play/pause:
+		// one remapped to next or previous skips instead of rewinding.
+		return effective_action(button) == KEYMAP_ACTION_PLAY_PAUSE;
+	}
+	keymap_action_t action = effective_action(button);
+	return action == KEYMAP_ACTION_NEXT || action == KEYMAP_ACTION_PREV;
+}
+
+// Which way a seek key scrubs: next forward, previous back, and a play-hold
+// rewinds.
+static bool seek_direction_forward(keymap_button_t button) {
+	keymap_action_t action = effective_action(button);
+	if (action == KEYMAP_ACTION_NEXT) {
+		return true;
+	}
+	if (action == KEYMAP_ACTION_PREV) {
+		return false;
+	}
+	return false; /* play-hold rewinds */
+}
+
+// Whether a hold may scrub the local transport at all. gui_seek_allowed() covers
+// the modes that hold the output for something else (USB DAC, Wi-Fi transfer,
+// metronome); the policy covers receiver and DLNA ownership. Checked on every
+// step, in Track mode too, so a hold never scrubs while a phone or a cast is
+// the thing actually playing.
+static bool local_seek_allowed(void) {
+	return gui_seek_allowed() &&
+		   seekpolicy_skip_mode_applies(btreceiver_is_active(), dlna_owns_playback());
+}
 
 static bool mapped_action_seeks(keymap_button_t button) {
 	keymap_action_t action = effective_action(button);
@@ -1495,20 +1634,88 @@ static bool mapped_action_seeks(keymap_button_t button) {
 // decoder here: the step moves the scrub position, the interface follows it,
 // and the seek itself happens when the button is let go (device_state.h).
 // Refuses on anything with no position to move along -- a live radio stream has
-// neither a length nor a point to come back to.
-static void seek_step(keymap_button_t button) {
-	keymap_action_t action = effective_action(button);
-	if (action != KEYMAP_ACTION_NEXT && action != KEYMAP_ACTION_PREV) {
-		return;
+// neither a length nor a point to come back to -- and on anything that is not
+// this player's to move (receiver mode, DLNA, a held output).
+static bool seek_step(keymap_button_t button) {
+	bool forward;
+	if (skip_mode_seek() && seek_key_action(button)) {
+		// In Seek mode the button's own meaning gives the direction: next
+		// forward, previous back, a play-hold rewinds.
+		forward = seek_direction_forward(button);
+	} else {
+		// Track mode keeps next forward and previous back; anything else is
+		// not a seek at all.
+		keymap_action_t action = effective_action(button);
+		if (action != KEYMAP_ACTION_NEXT && action != KEYMAP_ACTION_PREV) {
+			return false;
+		}
+		forward = action == KEYMAP_ACTION_NEXT;
+	}
+
+	// A hold never scrubs while the output belongs to something else, in Track
+	// mode too: in receiver mode or while DLNA owns playback the skip keys
+	// reach the phone or the cast, not this player.
+	if (!local_seek_allowed()) {
+		return false;
 	}
 
 	device_state_t state;
 	device_state_get(&state);
 	if (state.live || state.progress_total_secs <= 0) {
-		return;
+		return false;
 	}
 
-	device_state_scrub_by((action == KEYMAP_ACTION_NEXT) ? SEEK_STEP_SECONDS : -SEEK_STEP_SECONDS);
+	double step = seek_seconds(forward);
+	device_state_scrub_by(forward ? step : -step);
+	// Whether it actually started: a stopped track is refused inside
+	// device_state, and the caller needs to know so it can drop the hold.
+	return device_state_scrub_active(NULL);
+}
+
+// One step for a held headset hold code, through the same guards as seek_step():
+// nothing to move along on a live stream or an unknown length, and nothing that
+// belongs to a phone or a cast. The direction is crossed -- see
+// seekpolicy_headset_forward() for why a physical REWIND means forward.
+static bool seek_headset_step(int code) {
+	if (!local_seek_allowed()) {
+		return false;
+	}
+
+	// A hold that begins paused keeps the old silent scrub: it accumulates on
+	// every 250 ms repeat and commits once on release. A real seek mid-hold
+	// would move the position without any sound, which is the anti-goal here.
+	bool paused = audio_get_status() == AUDIO_STATUS_PAUSED;
+
+	// A case hold, or an earlier headset hold, can leave a scrub open when a
+	// preview starts. Land it before the first excerpt instead of letting
+	// device_state_seek_hold()'s scrub_cancel_only() drop it, and before
+	// device_state_get() so holdpreview_begin() receives the landed position
+	// rather than the still-open scrub target. Paused holds skip this so their
+	// silent scrub is not turned into a real seek on every repeat. This has to
+	// happen here: the preview ops run with holdpreview's lock held, where
+	// device_state_scrub_commit() would deadlock via holdpreview_cancel().
+	if (!paused && device_state_scrub_active(NULL)) {
+		device_state_scrub_commit();
+	}
+
+	device_state_t state;
+	device_state_get(&state);
+	if (state.live || state.progress_total_secs <= 0) {
+		return false;
+	}
+
+	bool forward = seekpolicy_headset_forward(code);
+	double step = seek_seconds(forward);
+	if (paused) {
+		device_state_scrub_by(forward ? step : -step);
+		return device_state_scrub_active(NULL);
+	}
+	bool started = holdpreview_begin(step, forward, state.live, state.progress_total_secs,
+									 state.progress_current_secs, state.current_file);
+	if (!started) {
+		printf("input: headset seek refused (no local transport or no length)\n");
+	}
+	return started;
 }
 
 // WHAT REPEATS IS THE ACTION, NOT THE KEY.
@@ -1526,34 +1733,50 @@ static bool key_repeats_held(int code, bool headset) {
 		return false;
 	}
 	if (headset) {
-		return code == KEY_VOLUMEUP || code == KEY_VOLUMEDOWN;
+		// The cable remote's volume repeats, and so do its hold codes: the app
+		// owns the hold repeat timer, but the driver's 200 ms value-1 stream is
+		// the evidence that the key is still down.
+		return code == KEY_VOLUMEUP || code == KEY_VOLUMEDOWN ||
+			   code == KEY_FASTFORWARD || code == KEY_REWIND;
 	}
 	keymap_button_t button = keymap_button_for_code(code);
-	return mapped_action_repeats(button) || mapped_action_seeks(button);
+	return mapped_action_repeats(button) || mapped_action_seeks(button) || seek_key_action(button);
 }
 
 // A held key that seeks rather than steps the volume: it waits longer before
 // the first step and then goes at its own pace.
 static bool key_seeks_held(int code, bool headset) {
-	if (code < 0 || headset) {
+	if (code < 0) {
 		return false;
 	}
-	return mapped_action_seeks(keymap_button_for_code(code));
+	if (headset) {
+		// The hold codes seek; the click codes and volume do not.
+		return code == KEY_FASTFORWARD || code == KEY_REWIND;
+	}
+	keymap_button_t button = keymap_button_for_code(code);
+	return mapped_action_seeks(button) || seek_key_action(button);
 }
 
 static void run_mapped_action(keymap_button_t button);
 
-static void repeat_held(int code, bool headset) {
+// One repeat of the held key. Returns true when the repeat started a scrub, so
+// the caller can mark the hold as a seek; a refused seek returns false and the
+// release then runs the ordinary action instead.
+static bool repeat_held(int code, bool headset) {
 	if (headset) {
+		// The hold codes scrub; every other held headset key (volume) steps.
+		if (code == KEY_FASTFORWARD || code == KEY_REWIND) {
+			return seek_headset_step(code);
+		}
 		apply_volume_step(code);
-		return;
+		return false;
 	}
 	keymap_button_t button = keymap_button_for_code(code);
-	if (mapped_action_seeks(button)) {
-		seek_step(button);
-		return;
+	if (mapped_action_seeks(button) || seek_key_action(button)) {
+		return seek_step(button);
 	}
 	run_mapped_action(button);
+	return false;
 }
 
 static void run_mapped_action(keymap_button_t button) {
@@ -1603,12 +1826,15 @@ static void handle_key_press(const char *node, int code, bool headset) {
 	// Only the cable remote reaches here: the side buttons were translated and
 	// dispatched above. On a remote next is next -- the upper/lower swap
 	// compensates for the buttons on the case, and there are none here.
+	//
+	// A headset's next/prev go to the chapter keys: the player turns them into
+	// a track change when no book is loaded. A remote's stay the plain pair.
 	case KEY_NEXTSONG:
-		gui_notify_key(GUI_KEY_NEXT);
+		gui_notify_key(headset ? GUI_KEY_NEXT_CHAPTER : GUI_KEY_NEXT);
 		break;
 
 	case KEY_PREVIOUSSONG:
-		gui_notify_key(GUI_KEY_PREV);
+		gui_notify_key(headset ? GUI_KEY_PREV_CHAPTER : GUI_KEY_PREV);
 		break;
 
 	default:
@@ -1656,13 +1882,16 @@ static void handle_key_press(const char *node, int code, bool headset) {
 static void run_hook_gesture(hook_clicks_t *clicks) {
 	switch (hook_clicks_take(clicks)) {
 	case HOOK_GESTURE_PLAY_PAUSE:
+		printf("input: headset click gesture -> play/pause\n");
 		gui_notify_key(GUI_KEY_PLAY_PAUSE);
 		break;
 	case HOOK_GESTURE_NEXT:
-		gui_notify_key(GUI_KEY_NEXT);
+		printf("input: headset click gesture -> next chapter/track\n");
+		gui_notify_key(GUI_KEY_NEXT_CHAPTER);
 		break;
 	case HOOK_GESTURE_PREV:
-		gui_notify_key(GUI_KEY_PREV);
+		printf("input: headset click gesture -> previous chapter/track\n");
+		gui_notify_key(GUI_KEY_PREV_CHAPTER);
 		break;
 	case HOOK_GESTURE_NONE:
 	default:
@@ -1710,6 +1939,13 @@ static void *input_thread_func(void *arg) {
 	uint32_t dbl_until = 0;
 	// The held key has already repeated its action: its release is not a click.
 	bool held_repeated = false;
+	// When an open scrub must be committed even though no release arrived.
+	uint32_t seek_deadline = 0; // armed while a seek is in progress
+	// A headset hold whose deadline committed early: its remaining value-1
+	// repeats are the same physical hold, not a new one, so they must not
+	// start a second scrub or a second commit on release.
+	int headset_hold_consumed = -1;
+	uint32_t headset_hold_consumed_until = 0;
 
 	for (;;) {
 		// The deadline is whatever the held key is waiting for; with nothing
@@ -1724,9 +1960,22 @@ static void *input_thread_func(void *arg) {
 			timeout = (int)(due > now ? due - now : 0);
 		}
 
+		// A seek that is still open must not outlive its deadline: the release
+		// may never come, and the scrub cannot be left to freeze the position.
+		if (seeked) {
+			int seek_wait = (int)(seek_deadline > now ? seek_deadline - now : 0);
+			if (timeout < 0 || seek_wait < timeout) {
+				timeout = seek_wait;
+			}
+		}
+
 		// Whichever comes first: the click window can be open with no key down
-		// at all, so it is a deadline of its own and not an else.
-		int hook_wait = hook_clicks_timeout(&hook, now);
+		// at all, so it is a deadline of its own and not an else. While the
+		// centre button is down there is no window to wait out -- it must not
+		// close into a play/pause before the driver has decided the press is a
+		// hold (500 ms) rather than a click -- so hook_wait is -1 then and the
+		// poll does not spin.
+		int hook_wait = (info->headset && held == KEY_PLAYPAUSE) ? -1 : hook_clicks_timeout(&hook, now);
 		if (hook_wait >= 0 && (timeout < 0 || hook_wait < timeout)) {
 			timeout = hook_wait;
 		}
@@ -1751,8 +2000,34 @@ static void *input_thread_func(void *arg) {
 			// Deadline reached with the key still down.
 			now = now_ms();
 
+			// A seek whose release never arrived -- the node went away, or the
+			// value-0 was lost -- is committed here rather than left to freeze
+			// the position for good. The hold is then dropped: a later value-1
+			// is a new press, not a continuation of this one.
+			if (seeked && (int32_t)(now - seek_deadline) >= 0) {
+				// A headset hold that outlives the deadline is not a new hold
+				// when the driver's next value-1 arrives: remember the code
+				// and swallow its repeats until the physical release.
+				if (info->headset && (held == KEY_FASTFORWARD || held == KEY_REWIND)) {
+					headset_hold_consumed = held;
+					headset_hold_consumed_until = now + HEADSET_HOLD_CONSUMED_MS;
+				}
+				if (holdpreview_owns_hold(info->headset)) {
+					holdpreview_end();
+				} else {
+					device_state_scrub_commit();
+				}
+				seeked = false;
+				held_repeated = false;
+				deferred = false;
+				seek_deadline = 0;
+				held = -1;
+			}
+
 			// No more clicks are coming: the gesture is whatever was counted.
-			if (hook_clicks_expired(&hook, now)) {
+			// A centre button still held is a hold, not a click, so the window
+			// is held open for it (see hookclicks.h).
+			if (hook_clicks_should_expire(&hook, now, info->headset && held == KEY_PLAYPAUSE)) {
 				run_hook_gesture(&hook);
 			}
 
@@ -1776,16 +2051,55 @@ static void *input_thread_func(void *arg) {
 					continue;
 				}
 				bool seeking = key_seeks_held(held, info->headset);
+				bool previewing = holdpreview_owns_hold(info->headset);
+				bool seek_started = false;
 				if (!suppressed) {
-					repeat_held(held, info->headset);
+					if (previewing) {
+						device_state_t state;
+						device_state_get(&state);
+						bool forward = seekpolicy_headset_forward(held);
+						seek_started = holdpreview_step(seek_seconds(forward), forward, state.live,
+														state.progress_total_secs, state.progress_current_secs,
+														state.current_file);
+						if (seek_started) {
+							log_preview_step();
+						}
+						if (!seek_started) {
+							// The preview noted its last position on the way out;
+							// the release must not seek or note again.
+							holdpreview_cancel();
+							seeked = false;
+							held_repeated = false;
+							deferred = false;
+							seek_deadline = 0;
+							held = -1;
+						}
+					} else {
+						seek_started = repeat_held(held, info->headset);
+					}
 				}
-				if (seeking) {
+				if (seeking && seek_started) {
 					// From here the release has nothing left to do: the press
-					// became a seek and must not also change track.
+					// became a seek and must not also change track. A headset's
+					// 200 ms value-1 stream is evidence the key is still down,
+					// so its deadline is re-armed and only a lost release fires
+					// it. A case button repeats on this thread's timer, which is
+					// not evidence about the physical key: it gets one long cap.
+					if (info->headset) {
+						seek_deadline = now + SEEK_DEADLINE_HEADSET_MS;
+					} else if (!seeked) {
+						seek_deadline = now + SEEK_DEADLINE_BUTTON_MS;
+					}
 					seeked = true;
+					held_repeated = true;
+				} else if (!seeking) {
+					// A volume key that repeated: its release is not a click.
+					held_repeated = true;
 				}
-				held_repeated = true;
-				next_repeat = now + (seeking ? SEEK_REPEAT_MS : VOLUME_REPEAT_PERIOD_MS);
+				// A seek that refused (live stream, stopped, no length) leaves
+				// both flags clear, so the release runs the ordinary action.
+				next_repeat = now + (previewing ? PREVIEW_PERIOD_MS :
+									 (seeking ? SEEK_REPEAT_MS : VOLUME_REPEAT_PERIOD_MS));
 			} else if (held == KEY_POWER && !long_press_done &&
 					   (int32_t)(now - (held_since + POWER_LONG_PRESS_MS)) >= 0) {
 				long_press_done = true;
@@ -1838,6 +2152,55 @@ static void *input_thread_func(void *arg) {
 		if (ev.value == 1) {
 			power_notify_activity(); // any physical button counts as use
 
+			// The headset hold codes are a seek from the moment they arrive:
+			// the driver has already waited its 500 ms, so there is no hold
+			// threshold to wait out here. Intercepted before the generic press
+			// path so a hold never toggles play/pause or changes track.
+			if (info->headset && (ev.code == KEY_FASTFORWARD || ev.code == KEY_REWIND)) {
+				hook_clicks_cancel(&hook); // a hold is not a click sequence
+				if (ev.code == headset_hold_consumed) {
+					if ((int32_t)(now_ms() - headset_hold_consumed_until) < 0) {
+						continue; // this physical hold already committed at the deadline
+					}
+					headset_hold_consumed = -1; // the release was lost; this is a new press
+				}
+				if (held == ev.code) {
+					continue; // the driver's 200 ms repeat: still held
+				}
+				held = ev.code;
+				held_since = now_ms();
+				deferred = false;
+				seeked = false;
+				held_repeated = false;
+				dbl_first = false;
+				if (local_seek_allowed() && seek_headset_step(ev.code)) {
+					seeked = true;
+					held_repeated = true;
+					// The first excerpt gets the full preview window too; a
+					// 250 ms repeat would cut the very step the listener needs.
+					next_repeat = now_ms() + (holdpreview_owns_hold(info->headset) ? PREVIEW_PERIOD_MS : SEEK_REPEAT_MS);
+					if (holdpreview_owns_hold(info->headset)) {
+						log_preview_step();
+					}
+					seek_deadline = now_ms() + SEEK_DEADLINE_HEADSET_MS;
+					printf("input: %s headset hold %d -> %s\n", node, ev.code,
+						   seekpolicy_headset_forward(ev.code) ? "forward" : "back");
+				} else {
+					printf("input: %s headset hold %d ignored\n", node, ev.code);
+				}
+				// A refusal (live stream, stopped, no length, receiver/DLNA)
+				// leaves the flags clear, so the release does nothing at all.
+				continue;
+			}
+
+			// A repeat of the key that is already down. Only the headset driver
+			// re-sends value=1 while a key is held; a case button repeats on
+			// this thread's timer, so swallowing here would drop a real press
+			// after a lost release.
+			if (info->headset && ev.code == held) {
+				continue;
+			}
+
 			// Volume + power: if a combination has fired -- now, or because the
 			// other key was already down -- this key belongs to it. The volume
 			// keys on the case only: the remote's are not under the thumb that
@@ -1849,7 +2212,11 @@ static void *input_thread_func(void *arg) {
 			// another key went down first and took `held` with it -- is closed
 			// here rather than left to freeze the position for good.
 			if (seeked) {
-				device_state_scrub_commit();
+				if (holdpreview_owns_hold(info->headset)) {
+					holdpreview_cancel();
+				} else {
+					device_state_scrub_commit();
+				}
 			}
 
 			// A first click waiting: this press is its second click, or it
@@ -1871,8 +2238,14 @@ static void *input_thread_func(void *arg) {
 
 			held = ev.code;
 			held_since = now_ms();
+			keymap_button_t button = keymap_button_for_code(ev.code);
 			bool seeks = key_seeks_held(held, info->headset);
-			next_repeat = held_since + (seeks ? SEEK_HOLD_MS : VOLUME_REPEAT_DELAY_MS);
+			// In Seek mode next and previous scrub from the instant they go
+			// down: there is no track change to wait out, so the first step is
+			// immediate. Play still waits for the hold threshold, or a quick
+			// tap would rewind instead of toggling play/pause.
+			bool immediate = !info->headset && seek_key_action(button) && button != KEYMAP_BTN_PLAY;
+			next_repeat = held_since + (seeks ? (immediate ? 0 : SEEK_HOLD_MS) : VOLUME_REPEAT_DELAY_MS);
 			long_press_done = false;
 			deferred = false;
 			seeked = false;
@@ -1895,6 +2268,16 @@ static void *input_thread_func(void *arg) {
 				deferred = true;
 			} else if (seeks) {
 				deferred = true;
+				// In Seek mode the first step runs now rather than after the
+				// hold threshold. A refusal (live stream, no length, or the
+				// output belonging elsewhere) leaves `seeked` clear so the
+				// release runs the ordinary action instead.
+				if (immediate && seek_step(button)) {
+					seeked = true;
+					held_repeated = true;
+					next_repeat = now_ms() + SEEK_REPEAT_MS;
+					seek_deadline = now_ms() + SEEK_DEADLINE_BUTTON_MS;
+				}
 			} else if (!info->headset && ev.code == KEY_VOLUMEDOWN && key_lock_gesture_armed()) {
 				// Possibly the first half of the lock gesture, with power to
 				// follow: what it does on its own waits for the release, or
@@ -1907,8 +2290,10 @@ static void *input_thread_func(void *arg) {
 				// Anything else ends the gesture: a volume key pressed halfway
 				// through means the centre button is finished with.
 				if (ev.code == KEY_NEXTSONG || ev.code == KEY_PREVIOUSSONG) {
-					hook_clicks_cancel(&hook); // the driver counted this one
-				} else {
+					// The driver counted this one itself: the pending count is
+					// thrown away so one gesture is never counted twice.
+					hook_clicks_cancel(&hook);
+				} else if (hook_clicks_pending(&hook)) {
 					run_hook_gesture(&hook);
 				}
 				handle_key_press(node, ev.code, info->headset);
@@ -1917,6 +2302,14 @@ static void *input_thread_func(void *arg) {
 		}
 
 		if (ev.value == 0) {
+			if (info->headset && ev.code == headset_hold_consumed) {
+				// The release of a hold that the deadline already committed:
+				// there is nothing left to seek, and the next press is a new
+				// gesture.
+				headset_hold_consumed = -1;
+				headset_hold_consumed_until = 0;
+				continue;
+			}
 			bool combo = !info->headset && combo_release(ev.code);
 
 			if (ev.code == KEY_POWER && !long_press_done && !combo) {
@@ -1942,12 +2335,20 @@ static void *input_thread_func(void *arg) {
 				// And one that did become a seek: this is where the music moves
 				// to where the thumb ran to, in a single seek.
 				if (seeked) {
-					device_state_scrub_commit();
+					if (info->headset) {
+						printf("input: %s headset hold end\n", node);
+					}
+					if (holdpreview_owns_hold(info->headset)) {
+						holdpreview_end();
+					} else {
+						device_state_scrub_commit();
+					}
 				}
 				held = -1;
 				long_press_done = false;
 				deferred = false;
 				seeked = false;
+				seek_deadline = 0;
 				held_repeated = false;
 				dbl_first = false;
 				override_button = KEYMAP_BTN_COUNT;
@@ -1955,6 +2356,18 @@ static void *input_thread_func(void *arg) {
 		}
 	}
 
+	// A node that disappears mid-hold (the headset unplugged) has no release to
+	// commit the scrub, and no reader to wait out the click window.
+	if (seeked) {
+		if (holdpreview_owns_hold(info->headset)) {
+			holdpreview_cancel();
+		} else {
+			device_state_scrub_commit();
+		}
+	}
+	if (hook_clicks_pending(&hook)) {
+		hook_clicks_cancel(&hook);
+	}
 	close(fd);
 	return NULL;
 }
@@ -1986,14 +2399,7 @@ static void start_input_thread(const char *node, bool headset) { start_input_thr
 // thread does with a real key -- the long press, the volume repeat, the seek on
 // hold, the remapping, the screenshot combination -- then works unchanged.
 static int host_key_pipe[2] = {-1, -1};
-
-static void start_host_input_thread(void) {
-	if (pipe(host_key_pipe) != 0) {
-		perror("input: pipe");
-		return;
-	}
-	start_input_thread_fd("keyboard", false, host_key_pipe[0]);
-}
+static int host_headset_pipe[2] = {-1, -1};
 
 void input_host_button(int code, bool down) {
 	if (host_key_pipe[1] < 0) {
@@ -2002,6 +2408,74 @@ void input_host_button(int code, bool down) {
 	struct input_event ev = {.type = EV_KEY, .code = (unsigned short)code, .value = down ? 1 : 0};
 	if (write(host_key_pipe[1], &ev, sizeof(ev)) != (ssize_t)sizeof(ev)) {
 		perror("input: write");
+	}
+}
+
+void input_host_headset_button(int code, bool down) {
+	if (host_headset_pipe[1] < 0) {
+		return;
+	}
+	struct input_event ev = {.type = EV_KEY, .code = (unsigned short)code, .value = down ? 1 : 0};
+	if (write(host_headset_pipe[1], &ev, sizeof(ev)) != (ssize_t)sizeof(ev)) {
+		perror("input: headset write");
+	}
+}
+
+// SONIX_INPUT_SCRIPT: a file of "milliseconds code value headset" lines. It
+// lets a shell test drive a whole headset gesture (click, hold, repeat, release)
+// without a window or a keyboard, and it is why the headset hold path can be
+// checked on a machine that has no earpods_adc node.
+static void *host_script_thread(void *unused) {
+	(void)unused;
+	const char *path = getenv("SONIX_INPUT_SCRIPT");
+	if (!path || !path[0]) {
+		return NULL;
+	}
+	FILE *f = fopen(path, "r");
+	if (!f) {
+		perror("input: script");
+		return NULL;
+	}
+	unsigned ms;
+	int code;
+	int value;
+	int headset;
+	char line[128];
+	uint32_t start = now_ms();
+	while (fgets(line, sizeof(line), f)) {
+		if (line[0] == '#' || line[0] == '\n') {
+			continue;
+		}
+		if (sscanf(line, "%u %d %d %d", &ms, &code, &value, &headset) != 4) {
+			continue;
+		}
+		uint32_t due = start + ms;
+		while ((int32_t)(now_ms() - due) < 0) {
+			usleep(1000);
+		}
+		if (headset) {
+			input_host_headset_button(code, value != 0);
+		} else {
+			input_host_button(code, value != 0);
+		}
+	}
+	fclose(f);
+	return NULL;
+}
+
+static void start_host_input_thread(void) {
+	if (pipe(host_key_pipe) != 0 || pipe(host_headset_pipe) != 0) {
+		perror("input: pipe");
+		return;
+	}
+	start_input_thread_fd("keyboard", false, host_key_pipe[0]);
+	start_input_thread_fd("headset-keyboard", true, host_headset_pipe[0]);
+
+	if (getenv("SONIX_INPUT_SCRIPT")) {
+		pthread_t script;
+		if (pthread_create(&script, NULL, host_script_thread, NULL) == 0) {
+			pthread_detach(script);
+		}
 	}
 }
 #endif
@@ -2601,6 +3075,14 @@ void system_start_services(system_config_t *cfg, system_notification_cb_t notifi
 	}
 
 	log_input_devices();
+
+	holdpreview_ops_t preview_ops = {
+		.allowed = local_seek_allowed,
+		.status = preview_status,
+		.seek = device_state_seek_hold,
+		.note = preview_note,
+	};
+	holdpreview_init(&preview_ops);
 
 #ifdef HOST_BUILD
 	start_host_input_thread();
