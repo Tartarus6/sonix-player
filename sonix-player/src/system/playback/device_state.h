@@ -133,6 +133,12 @@ bool device_state_play_queue_index(int index);
 // if playback should stop (end of folder in normal mode / empty queue).
 bool device_state_advance_auto(char *out_path, size_t out_size);
 
+// True when the selected mode stops a non-ordered music queue after the current
+// track. Audiobooks and ordered (podcast) queues carry on in every mode, so the
+// cover prefetch asks this same question rather than keeping a second copy of
+// the rule.
+bool device_state_stop_after_music(void);
+
 // Whether consecutive album playback -- one record rolling into the next -- is
 // switched on, and the setting behind it.
 bool device_state_album_chaining(void);

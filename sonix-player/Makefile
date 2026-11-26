@@ -229,11 +229,29 @@ HOST_OBJS = $(APP_SRCS:src/%.c=build_host/%.o) $(APP_CXX_SRCS:src/%.cpp=build_ho
 TARGET_OBJS = $(APP_SRCS:src/%.c=build_target/%.o) $(APP_CXX_SRCS:src/%.cpp=build_target/%.opp) \
 			  $(LVGL_SRCS:$(LVGL_DIR)/%.c=build_target/lvgl/%.o)
 
-.PHONY: all host target clean compile_commands.json
+.PHONY: all host test test-playback-mode target clean compile_commands.json
 
 all: host compile_commands.json
 
 host: $(HOST_BIN) compile_commands.json
+
+# Host-side checks that do not need LVGL or the host audio libraries: playlist.c
+# and device_state.c are built with a test that stubs out the surrounding
+# library/cue/config/audio layers. Section GC drops the device-state functions
+# the test never calls, and with them their dependency stubs.
+test: test-playback-mode
+
+TEST_BIN = build_host/test_playback_mode
+TEST_CFLAGS = -O1 -g -Wall -I. -DHOST_BUILD=1 -ffunction-sections -fdata-sections
+TEST_LDFLAGS = -Wl,--gc-sections
+TEST_SRCS = tests/test_playback_mode.c src/system/playback/playlist.c src/system/playback/device_state.c
+
+test-playback-mode: $(TEST_BIN)
+	@./$(TEST_BIN)
+
+$(TEST_BIN): $(TEST_SRCS) src/system/playback/playlist.h src/system/playback/device_state.h
+	@mkdir -p $(dir $@)
+	$(CC) $(TEST_CFLAGS) -o $@ $(TEST_SRCS) $(TEST_LDFLAGS)
 
 $(HOST_BIN): $(HOST_OBJS)
 	$(HOST_LD) -o $@ $(HOST_OBJS) $(HOST_LDFLAGS)

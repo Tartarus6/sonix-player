@@ -948,6 +948,8 @@ bool playlist_move(int from, int to) {
 
 bool playlist_is_custom(void) { return custom_queue; }
 
+bool playlist_is_ordered(void) { return ordered_queue; }
+
 void playlist_set_custom(bool custom) { custom_queue = custom; }
 
 unsigned playlist_revision(void) { return revision; }
@@ -1204,6 +1206,11 @@ bool playlist_advance_auto(char *out, size_t out_size) {
 	if (entry_count == 0)
 		return false;
 
+	// Stop-after is decided by device_state_advance_auto(), not here: it is a
+	// music mode, so an audiobook's folder queue must still be able to step to
+	// its next part. The mode only ever turns playback off; it must not turn a
+	// queue's own advance function off along with it.
+
 	// A queue that carries its own order is played straight through: one step
 	// forward, then stop. Shuffle and repeat mean nothing on a sequence of
 	// episodes, which is also why the player hides that button during a
@@ -1256,6 +1263,10 @@ bool playlist_peek_auto(char *out, size_t out_size) {
 	if (entry_count == 0 || !out) {
 		return false;
 	}
+	// As with playlist_advance_auto(): the stop-after decision belongs to the
+	// device-state layer, so read-ahead and cover prefetch of an audiobook's
+	// next part keep working in that mode. device_state_read_ahead() already
+	// skips read-ahead for music in stop-after mode.
 	size_t next;
 	if (ordered_queue) {
 		if (pos + 1 >= entry_count) {
@@ -1360,6 +1371,9 @@ playback_mode_t playlist_cycle_mode(void) {
 	playback_mode_t old = mode;
 	switch (mode) {
 	case PLAYBACK_MODE_NORMAL:
+		mode = PLAYBACK_MODE_STOP_AFTER;
+		break;
+	case PLAYBACK_MODE_STOP_AFTER:
 		mode = PLAYBACK_MODE_REPEAT_ALL;
 		break;
 	case PLAYBACK_MODE_REPEAT_ALL:

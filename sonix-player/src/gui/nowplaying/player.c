@@ -3232,9 +3232,10 @@ static void cover_request_size(int *w, int *h) {
 // The next track's cover, made and kept in the cache while this one plays, so
 // that skipping to it, or reaching it, finds it ready instead of decoding it
 // then. Only with the screen on: with it off nobody sees the cover arrive, and
-// the decode would be battery spent on a guess.
+// the decode would be battery spent on a guess. Nor in stop-after music mode:
+// that track will never play, so there is no cover worth decoding ahead.
 static void prefetch_next_cover(void) {
-	if (!power_screen_is_on() || live_mode) {
+	if (!power_screen_is_on() || live_mode || device_state_stop_after_music()) {
 		return;
 	}
 	char next[512];
@@ -4074,6 +4075,10 @@ static void update_repeat_button(void) {
 		break;
 	case PLAYBACK_MODE_SHUFFLE_REPEAT:
 		icon = &icon_shuffle_repeat;
+		color = active;
+		break;
+	case PLAYBACK_MODE_STOP_AFTER:
+		icon = &icon_repeat_stop;
 		color = active;
 		break;
 	case PLAYBACK_MODE_NORMAL:

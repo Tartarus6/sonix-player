@@ -18,6 +18,9 @@ typedef enum {
 	// ever is random exactly once. Added last so the numbers the earlier modes
 	// are saved under do not move.
 	PLAYBACK_MODE_SHUFFLE_REPEAT,
+	// Play the current track, then stop -- even when more tracks follow in the
+	// queue. Appended so persisted mode values keep their meaning.
+	PLAYBACK_MODE_STOP_AFTER,
 } playback_mode_t;
 
 // Builds the queue from every playable file in `folder`, ordered the same way
@@ -94,6 +97,12 @@ bool playlist_move(int from, int to);
 
 // True while the queue is a custom list rather than a folder.
 bool playlist_is_custom(void);
+
+// True while the queue carries its own order (a podcast's episodes) instead of
+// being a folder or a library list. Shuffle and the playback modes leave such a
+// queue alone, and "stop after the current track" is a music mode: it does not
+// apply here either.
+bool playlist_is_ordered(void);
 
 // Whether the queue is sitting on its last entry, in queue order. Says nothing
 // about what happens next -- that is the playback mode's business -- only that
@@ -241,8 +250,8 @@ bool playlist_prev(char *out, size_t out_size);
 
 void playlist_set_mode(playback_mode_t mode);
 playback_mode_t playlist_get_mode(void);
-// Advances to the next mode (NORMAL -> REPEAT_ALL -> REPEAT_ONE -> SHUFFLE ->
-// NORMAL) and returns the new mode.
+// Advances to the next mode (NORMAL -> STOP_AFTER -> REPEAT_ALL -> REPEAT_ONE
+// -> SHUFFLE -> SHUFFLE_REPEAT -> NORMAL) and returns the new mode.
 playback_mode_t playlist_cycle_mode(void);
 
 #endif // PLAYLIST_H

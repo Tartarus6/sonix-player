@@ -1278,6 +1278,11 @@ static bool chain_beside(bool forward) {
 	return false;
 }
 
+bool device_state_stop_after_music(void) {
+	return !audiobook_is_playing() && !playlist_is_ordered() &&
+		   playlist_get_mode() == PLAYBACK_MODE_STOP_AFTER;
+}
+
 bool device_state_advance_auto(char *out_path, size_t out_size) {
 	if (radio_is_active()) {
 		return false; // a stream never finishes, so there is nothing to advance to
@@ -1313,6 +1318,13 @@ bool device_state_advance_auto(char *out_path, size_t out_size) {
 
 	char path[512];
 	playlist_resync_to_current();
+
+	// "Play once": stop after this track, with no album/folder chaining. A music
+	// mode, so a podcast's ordered queue is left to play on as it always did.
+	if (device_state_stop_after_music()) {
+		playhistory_left();
+		return false;
+	}
 
 	// The end of a record or of a folder, asked before the queue is advanced
 	// rather than after it fails to advance.
@@ -1362,6 +1374,9 @@ void device_state_read_ahead(double position, double total) {
 	// queue, which record or folder follows (if any) is decided when the track
 	// ends, so there is nothing to read ahead of.
 	if (audiobook_is_playing() && !audiobook_has_next_part()) {
+		return;
+	}
+	if (device_state_stop_after_music()) {
 		return;
 	}
 	if (playlist_at_end() && playlist_get_mode() != PLAYBACK_MODE_REPEAT_ONE) {
