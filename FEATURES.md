@@ -32,6 +32,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **Split artists and genres** - a track with "A & B" or "A feat. B" shows up under both names. You choose the symbols that split them, and you can add names that must never be split.
 - **Join albums** - tracks of the same album in the same folder become one album, even if the artists are different.
 - **Detect changes** - new tracks are added by themselves when the player starts, when the microSD goes back in, after USB or after Wi-Fi transfer. It can also pick up tracks you retagged.
+- **Download covers** - in Settings > Music > Library, the player counts the albums with no artwork and downloads their covers from MusicBrainz in one go, saving each picture beside the tracks. It shows progress as it runs, can be cancelled, and offers to retry the albums it missed (needs Wi-Fi).
 - **Alternative album view** - the album opens with its big cover on top, with title, artist, genre and year, and the tracks underneath.
 - **Tapping an artist, a genre or a year** can open its albums instead of its tracks.
 - **Show artist** under the title in the lists you choose.
@@ -58,6 +59,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 ## Now Playing
 
 - The cover fills the top of the screen, with the same picture blurred behind the controls.
+- **Find cover** - when a track has no artwork, a button in Now Playing looks for its album cover on MusicBrainz and saves it beside the track. If Wi-Fi is off, the player asks to turn it on and starts the search by itself.
 - **Three layouts** - Standard, Waveform (the progress bar becomes the waveform of the track) and Alternative.
 - **Cover colour** - the buttons and the bar take the main colour of the cover.
 - **Cover Flow** - swipe up from the bottom edge of the Music page to flip through your albums.

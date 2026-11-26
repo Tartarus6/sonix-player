@@ -39,6 +39,7 @@
 #include "src/system/bluetooth/btreceiver.h"
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
+#include "src/system/library/coverfetch.h"
 #include "src/system/library/library.h"
 #include "src/system/library/lrclib.h"
 #include "src/system/library/lyrics.h"
@@ -934,10 +935,16 @@ static void prefetch_next_cover(void);
 // of its own over the blurred copy -- and the artwork arrives on a worker, so
 // whatever the arrangement did when it was set up would be undone the moment a
 // cover landed.
+static void coverfind_sync(void);
+
+static bool coverfind_missing; // no artwork on the current track
+
 static void cover_show(bool have_cover) {
 	if (!cover_img) {
 		return;
 	}
+	coverfind_missing = !have_cover;
+	coverfind_sync();
 	bool studio = layout_studio_now;
 	if (have_cover && !studio) {
 		lv_obj_set_hidden(cover_img, false);
@@ -1758,6 +1765,13 @@ static lv_obj_t *lyrics_find_btn;
 static lv_obj_t *lyrics_find_icon;
 static lv_obj_t *lyrics_find_narrowed; // the names' column, made room in
 
+// The same corner, for a track with no artwork: the small button that looks a
+// cover up on MusicBrainz. It only appears while there is a gap to fill, and
+// sits beside the lyrics button when the words are up.
+#define COVERFIND_BTN 56
+static lv_obj_t *coverfind_btn;
+static lv_obj_t *coverfind_icon;
+
 // The names at the top give up the button's width on both sides, so a long
 // title stays centred and stops short of it.
 static void lyrics_find_make_room(lv_obj_t *col) {
@@ -1783,6 +1797,7 @@ static void lyrics_find_sync(bool full) {
 	if (!show) {
 		lv_obj_set_hidden(lyrics_find_btn, true);
 		lyrics_find_make_room(NULL);
+		coverfind_sync();
 		return;
 	}
 	int width = layout_studio_now ? studio_box_w : cover_box_w;
@@ -1799,6 +1814,44 @@ static void lyrics_find_sync(bool full) {
 	lv_obj_set_style_image_recolor(lyrics_find_icon, lyrics_backdrop() ? lv_color_white() : theme()->text_primary, 0);
 	lv_obj_set_hidden(lyrics_find_btn, false);
 	lv_obj_move_foreground(lyrics_find_btn);
+	// The cover button keeps its place beside this one, and this one stays on
+	// top if the two ever touch.
+	coverfind_sync();
+	lv_obj_move_foreground(lyrics_find_btn);
+}
+
+// Shown only while the playing file has no artwork of its own: the cover
+// loader's answer is what decides, so this follows cover_show() and the lyrics
+// button sliding in and out. A stream has no folder to write a cover into.
+static void coverfind_sync(void) {
+	if (!coverfind_btn) {
+		return;
+	}
+	device_state_t state;
+	device_state_get(&state);
+	bool show = coverfind_missing && state.current_file[0] && playing_local_file(&state);
+	if (!show) {
+		lv_obj_set_hidden(coverfind_btn, true);
+		return;
+	}
+	int32_t x;
+	if (lyrics_find_btn && !lv_obj_is_hidden(lyrics_find_btn)) {
+		// Beside the lyrics button, to its left.
+		x = lv_obj_get_x(lyrics_find_btn) - COVERFIND_BTN;
+	} else {
+		int width = layout_studio_now ? studio_box_w : cover_box_w;
+		int beside = 0;
+		if (layout_studio_now && more_btn_obj) {
+			beside = lv_obj_get_width(more_btn_obj);
+		} else if (layout_alt_now && fav_btn_obj) {
+			beside = lv_obj_get_width(fav_btn_obj);
+		}
+		x = width - STUDIO_MARGIN - beside - COVERFIND_BTN;
+	}
+	lv_obj_set_pos(coverfind_btn, x, back_btn_centre_y() - COVERFIND_BTN / 2);
+	lv_obj_set_style_image_recolor(coverfind_icon, lyrics_backdrop() ? lv_color_white() : theme()->text_primary, 0);
+	lv_obj_set_hidden(coverfind_btn, false);
+	lv_obj_move_foreground(coverfind_btn);
 }
 
 // Everything the swipe moves, at `progress` of the way from the sleeve (0)
@@ -2233,6 +2286,357 @@ static void lyrics_offer_download(void) {
 	confirm_show("lyrics_download_title", "lyrics_download_note", "lyrics_download", lyrics_download_cb, NULL);
 }
 
+// ---------------------------------------------------------------------------
+// A cover for a file with none, from MusicBrainz
+//
+// The same shape as the lyrics search above: one request at a time on a worker
+// thread, the answer posted back here, and Wi-Fi offered rather than switched
+// on behind the user's back. A result is written as cover.jpg beside the track;
+// artwork that is already there is never touched.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+	char path[1024];
+	char album[256];
+	char artist[256];
+	char title[256];
+	coverfetch_result_t result;
+	coverfetch_record_t *records;
+	int count;
+} coverfetch_find_job_t;
+
+static bool coverfetch_find_fetching; // one search at a time
+
+// After a save the new cover.jpg is beside the file, so ask for the artwork
+// again as on a track change, without the id comparison -- there was nothing on
+// screen before to compare it with.
+void player_cover_reload(const char *path) {
+	device_state_t state;
+	device_state_get(&state);
+	if (!path || strcmp(state.current_file, path) != 0) {
+		return;
+	}
+	cover_shown_id = 0;
+	cover_incoming_id = 0;
+	cover_id_state = COVER_ID_IDLE;
+	reload_cover(path);
+}
+
+// One cover to write: the path it was searched for and a copy of the chosen
+// record. coverfetch_save() blocks on the network, so it runs on a worker;
+// only the answer comes back to the interface thread.
+typedef struct {
+	char path[1024];
+	coverfetch_record_t record;
+	bool saved;
+} coverfetch_find_save_t;
+
+static void coverfetch_find_saved(void *user) {
+	coverfetch_find_save_t *save = user;
+	device_state_t state;
+	device_state_get(&state);
+	// A track change during the write leaves the file in place, but nothing is
+	// shown for a cover that is no longer the one playing.
+	if (strcmp(state.current_file, save->path) == 0) {
+		if (save->saved) {
+			player_cover_reload(save->path);
+			toast_success("coverfetch_find_saved");
+		} else {
+			toast_error("coverfetch_find_failed");
+		}
+	}
+	free(save);
+}
+
+static void *coverfetch_find_save_worker(void *arg) {
+	coverfetch_find_save_t *save = arg;
+	// The card may have been exported or pulled since the cover was chosen.
+	// Without this the save lands in internal storage. gui_notify_no_card()
+	// posts from this worker to the interface thread, so the error is visible.
+	if (!gui_card_available()) {
+		gui_notify_no_card();
+		free(save);
+		return NULL;
+	}
+	save->saved = coverfetch_save(save->path, "", &save->record, false);
+	if (!gui_post(coverfetch_find_saved, save)) {
+		free(save);
+	}
+	return NULL;
+}
+
+// Takes ownership of `save`, whether or not the thread starts.
+static void coverfetch_find_save_dispatch(coverfetch_find_save_t *save) {
+	pthread_t thread;
+	if (pthread_create(&thread, NULL, coverfetch_find_save_worker, save) != 0) {
+		free(save);
+		toast_error("coverfetch_find_failed");
+		return;
+	}
+	pthread_detach(thread);
+}
+
+// Copies the record so the caller can free its list while the write is running.
+static void coverfetch_find_save_async(const char *path, const coverfetch_record_t *record) {
+	coverfetch_find_save_t *save = calloc(1, sizeof(*save));
+	if (!save) {
+		toast_error("coverfetch_find_failed");
+		return;
+	}
+	snprintf(save->path, sizeof(save->path), "%s", path);
+	save->record = *record;
+	coverfetch_find_save_dispatch(save);
+}
+
+// A chosen release from the list: the check keeps a track change while the list
+// was up from writing its cover onto the next track.
+static void coverfetch_find_pick_cb(void *user) {
+	coverfetch_find_save_t *save = user;
+	device_state_t state;
+	device_state_get(&state);
+	if (strcmp(state.current_file, save->path) != 0) {
+		free(save);
+		return;
+	}
+	coverfetch_find_save_dispatch(save);
+}
+
+// Up to five choices in the popover the player already uses for a choice
+// between alternatives: each row is a release, named by its cover's source.
+// The save attached to a row is owned here, not by the popover: only the picked
+// row's action consumes one, so the close hook frees whatever is left over
+// when the list is dismissed or replaced.
+#define COVERFIND_CHOICES_MAX 5
+static coverfetch_find_save_t *coverfind_choice_saves[COVERFIND_CHOICES_MAX];
+static int coverfind_choice_count;
+
+static void coverfind_choices_release(int picked) {
+	for (int i = 0; i < coverfind_choice_count; i++) {
+		if (i != picked) {
+			free(coverfind_choice_saves[i]);
+		}
+		coverfind_choice_saves[i] = NULL;
+	}
+	coverfind_choice_count = 0;
+}
+
+static void coverfetch_find_choices(const coverfetch_find_job_t *job) {
+	popover_item_t items[COVERFIND_CHOICES_MAX] = {0};
+	int shown = 0;
+	// Closing first runs the previous list's hook, releasing its saves, and
+	// hides the old rows so no stale user pointer can be tapped.
+	popover_close();
+	for (int i = 0; i < job->count && shown < COVERFIND_CHOICES_MAX; i++) {
+		coverfetch_find_save_t *save = calloc(1, sizeof(*save));
+		if (!save) {
+			break;
+		}
+		snprintf(save->path, sizeof(save->path), "%s", job->path);
+		save->record = job->records[i];
+		items[shown].label = save->record.source;
+		items[shown].action = coverfetch_find_pick_cb;
+		items[shown].user = save;
+		coverfind_choice_saves[shown] = save;
+		shown++;
+	}
+	if (!shown) {
+		toast_error("coverfetch_find_failed");
+		return;
+	}
+	coverfind_choice_count = shown;
+	popover_show(coverfind_btn, items, shown);
+	popover_set_close_hook(coverfind_choices_release);
+}
+
+static void coverfetch_find_fetched(void *user) {
+	coverfetch_find_job_t *job = user;
+	coverfetch_find_fetching = false;
+	toast_busy_end();
+
+	switch (job->result) {
+	case COVERFETCH_OK: {
+		device_state_t state;
+		device_state_get(&state);
+		// Only for the file it was asked about, over the player it was asked
+		// from; with either gone the answer is no longer wanted.
+		if (!sheet_open || strcmp(state.current_file, job->path) != 0) {
+			break;
+		}
+		if (job->count == 1) {
+			coverfetch_find_save_async(job->path, &job->records[0]);
+		} else {
+			coverfetch_find_choices(job);
+		}
+		break;
+	}
+	case COVERFETCH_NOT_FOUND:
+		toast_plain("coverfetch_find_not_found");
+		break;
+	case COVERFETCH_NO_TAGS:
+		toast_error("coverfetch_find_no_tags");
+		break;
+	case COVERFETCH_CANCELLED:
+		break;
+	default:
+		toast_error("coverfetch_find_failed");
+		break;
+	}
+	coverfetch_free(job->records, job->count);
+	free(job);
+}
+
+static void *coverfetch_find_worker(void *arg) {
+	coverfetch_find_job_t *job = arg;
+	job->result = coverfetch_search(job->album, job->artist, job->title, &job->records, &job->count);
+	if (!gui_post(coverfetch_find_fetched, job)) {
+		coverfetch_free(job->records, job->count);
+		free(job);
+	}
+	return NULL;
+}
+
+static void coverfetch_find_run(void);
+
+// ---------------------------------------------------------------------------
+// Wi-Fi switched on for a cover search
+//
+// With Wi-Fi off the question offers to switch it on instead of searching; the
+// search then starts by itself once the link has an address, for the file that
+// was playing when the question was answered.
+// ---------------------------------------------------------------------------
+
+#define COVERFIND_WIFI_POLL_MS 500
+#define COVERFIND_WIFI_WAIT_MS 30000
+
+static lv_timer_t *coverfetch_find_wifi_timer;
+static uint32_t coverfetch_find_wifi_since;
+static char coverfetch_find_wifi_path[1024];
+
+static bool coverfetch_find_wifi_online(void) {
+	wifi_status_t wifi;
+	wifi_get_status(&wifi);
+	return wifi.state == WIFI_STATE_CONNECTED && wifi.ip[0] != '\0';
+}
+
+static void coverfetch_find_wifi_wait_end(void) {
+	if (coverfetch_find_wifi_timer) {
+		lv_timer_delete(coverfetch_find_wifi_timer);
+		coverfetch_find_wifi_timer = NULL;
+	}
+}
+
+static void coverfetch_find_wifi_tick_cb(lv_timer_t *t) {
+	(void)t;
+	device_state_t state;
+	device_state_get(&state);
+	// Another track, Wi-Fi switched off again, or the player left: the search
+	// is no longer wanted. Its answer would be discarded on arrival anyway.
+	if (!sheet_open || !wifi_get_enabled() || strcmp(state.current_file, coverfetch_find_wifi_path) != 0) {
+		coverfetch_find_wifi_wait_end();
+		toast_busy_end();
+		return;
+	}
+	if (coverfetch_find_wifi_online()) {
+		coverfetch_find_wifi_wait_end();
+		toast_busy_end();
+		coverfetch_find_run();
+		return;
+	}
+	if (lv_tick_elaps(coverfetch_find_wifi_since) >= COVERFIND_WIFI_WAIT_MS) {
+		coverfetch_find_wifi_wait_end();
+		toast_busy_end();
+		toast_error("coverfetch_find_failed");
+	}
+}
+
+static void coverfetch_find_enable_wifi_cb(void *user) {
+	(void)user;
+	device_state_t state;
+	device_state_get(&state);
+	if (!state.current_file[0] || !playing_local_file(&state)) {
+		return;
+	}
+	snprintf(coverfetch_find_wifi_path, sizeof(coverfetch_find_wifi_path), "%s", state.current_file);
+	wifi_set_enabled(true);
+	coverfetch_find_wifi_since = lv_tick_get();
+	if (!coverfetch_find_wifi_timer) {
+		coverfetch_find_wifi_timer = lv_timer_create(coverfetch_find_wifi_tick_cb, COVERFIND_WIFI_POLL_MS, NULL);
+	}
+	toast_busy_dismissable("coverfetch_find_searching");
+}
+
+// Wi-Fi is off and can be switched on: the question offers that in place of
+// the search.
+static bool coverfetch_find_offer_wifi(void) {
+	if (coverfetch_find_wifi_timer) {
+		toast_busy_dismissable("coverfetch_find_searching");
+		return true;
+	}
+	if (wifi_get_enabled() || !wifi_available()) {
+		return false;
+	}
+	confirm_show("coverfetch_find_wifi_title", "coverfetch_find_wifi_note", "coverfetch_find_enable_wifi",
+				 coverfetch_find_enable_wifi_cb, NULL);
+	return true;
+}
+
+static void coverfetch_find_start(void) {
+	if (!coverfetch_find_fetching && coverfetch_find_offer_wifi()) {
+		return;
+	}
+	coverfetch_find_run();
+}
+
+// The file playing looked up on MusicBrainz, on a thread of its own.
+static void coverfetch_find_run(void) {
+	if (coverfetch_find_fetching) {
+		toast_busy_dismissable("coverfetch_find_searching");
+		return;
+	}
+	wifi_status_t wifi;
+	wifi_get_status(&wifi);
+	if (wifi.state != WIFI_STATE_CONNECTED) {
+		toast_error("coverfetch_find_failed");
+		return;
+	}
+	device_state_t state;
+	device_state_get(&state);
+	if (!state.current_file[0] || !playing_local_file(&state)) {
+		return;
+	}
+
+	coverfetch_find_job_t *job = calloc(1, sizeof(*job));
+	if (!job) {
+		return;
+	}
+	snprintf(job->path, sizeof(job->path), "%s", state.current_file);
+	snprintf(job->album, sizeof(job->album), "%s", state.metadata.album);
+	// The track's own performer first; the album's artist only when the track
+	// names none, as in the lyrics search.
+	snprintf(job->artist, sizeof(job->artist), "%s", state.metadata.artist[0] ? state.metadata.artist : state.metadata.album_artist);
+	snprintf(job->title, sizeof(job->title), "%s", state.metadata.title);
+
+	pthread_t thread;
+	if (pthread_create(&thread, NULL, coverfetch_find_worker, job) != 0) {
+		free(job);
+		return;
+	}
+	pthread_detach(thread);
+	coverfetch_find_fetching = true;
+	// A tap puts the spinner away while the search is retried; the cover is
+	// picked or saved when the answer comes.
+	toast_busy_dismissable("coverfetch_find_searching");
+}
+
+// The corner button over a file with no artwork.
+static void coverfetch_find_cb(lv_event_t *e) {
+	(void)e;
+	if (player_sheet_drag_active()) {
+		return;
+	}
+	coverfetch_find_start();
+}
+
 // The swipe that pulls the page in (on the sleeve, right to left) or pushes it
 // out (on the words, left to right). `opening` is the user data. Sideways
 // only: a movement that reads as vertical is the column being scrolled, and
@@ -2449,6 +2853,23 @@ static void lyrics_build(void) {
 	lv_obj_add_style(lyrics_find_icon, &theme_style_icon, 0);
 	lv_obj_set_style_image_recolor_opa(lyrics_find_icon, LV_OPA_COVER, 0);
 	lv_obj_center(lyrics_find_icon);
+
+	// The matching corner button for a track with no cover. It is only shown
+	// once a file without artwork has been loaded, by coverfind_sync().
+	coverfind_btn = lv_btn_create(player_screen);
+	lv_obj_set_ignore_layout(coverfind_btn, true);
+	lv_obj_set_size(coverfind_btn, COVERFIND_BTN, COVERFIND_BTN);
+	lv_obj_set_style_bg_opa(coverfind_btn, LV_OPA_TRANSP, 0);
+	lv_obj_set_style_shadow_width(coverfind_btn, 0, 0);
+	lv_obj_set_style_border_width(coverfind_btn, 0, 0);
+	lv_obj_set_ext_click_area(coverfind_btn, CORNER_BTN_EXT_CLICK);
+	lv_obj_add_event_cb(coverfind_btn, coverfetch_find_cb, LV_EVENT_CLICKED, NULL);
+	lv_obj_set_hidden(coverfind_btn, true);
+	coverfind_icon = lv_image_create(coverfind_btn);
+	lv_image_set_src(coverfind_icon, &icon_album);
+	lv_obj_add_style(coverfind_icon, &theme_style_icon, 0);
+	lv_obj_set_style_image_recolor_opa(coverfind_icon, LV_OPA_COVER, 0);
+	lv_obj_center(coverfind_icon);
 
 	// The sleeve is where the page is pulled in from.
 	lv_obj_add_event_cb(cover_panel, lyrics_drag_cb, LV_EVENT_PRESSED, (void *)(uintptr_t) true);
@@ -4883,6 +5304,12 @@ static void sheet_hidden_anim_ready_cb(lv_anim_t *a) {
 void player_sheet_close(bool animate) {
 	bool was_open = sheet_open;
 	sheet_open = false;
+	// A cover search waiting for Wi-Fi belongs to this sheet: leaving drops it
+	// rather than starting a search whose result would then be discarded.
+	if (coverfetch_find_wifi_timer) {
+		coverfetch_find_wifi_wait_end();
+		toast_busy_end();
+	}
 	smooth_timer_sync();
 	back_btn_player_mode(false);
 	lyrics_screen_hold_update();

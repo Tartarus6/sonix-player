@@ -29,4 +29,11 @@ void popover_show(lv_obj_t *anchor, const popover_item_t *items, int count);
 // Closes it (the veil tap and every item do this on their own).
 void popover_close(void);
 
+// Optional owner hook for menus whose item.user pointers own heap memory.
+// Called when the menu is dismissed, replaced, or an item is picked, with the
+// picked item's index or -1 for a dismissal/replacement. The picked item stays
+// valid through its action; the hook should release the others. One hook is
+// active at a time and is cleared when it runs.
+void popover_set_close_hook(void (*hook)(int picked));
+
 #endif /* POPOVER_H */

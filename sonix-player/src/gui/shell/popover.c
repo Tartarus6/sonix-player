@@ -18,12 +18,25 @@ static lv_obj_t *card;
 
 static popover_item_t items_copy[POPOVER_MAX_ITEMS];
 static int items_count;
+static void (*close_hook)(int picked);
 
-void popover_close(void) {
+// The single close path: hand the picked item to its owner before the action
+// runs, or -1 when the menu is dismissed or replaced. Clear the hook first so
+// a menu opened by the hook or the action can register its own.
+static void popover_close_picked(int picked) {
+	void (*hook)(int) = close_hook;
+	close_hook = NULL;
 	if (veil) {
 		lv_obj_set_hidden(veil, true);
 	}
+	if (hook) {
+		hook(picked);
+	}
 }
+
+void popover_close(void) { popover_close_picked(-1); }
+
+void popover_set_close_hook(void (*hook)(int picked)) { close_hook = hook; }
 
 static void veil_clicked_cb(lv_event_t *e) {
 	(void)e;
@@ -39,7 +52,7 @@ static void item_clicked_cb(lv_event_t *e) {
 	// Close first: the action may well open another page, and the veil must
 	// not linger over it.
 	popover_item_t item = items_copy[index];
-	popover_close();
+	popover_close_picked(index);
 
 	if (item.action) {
 		item.action(item.user);
@@ -81,6 +94,8 @@ void popover_show(lv_obj_t *anchor, const popover_item_t *items, int count) {
 	if (!veil || !items || count <= 0) {
 		return;
 	}
+	// A replacement releases any dynamic item data the old menu still owns.
+	popover_close_picked(-1);
 	if (count > POPOVER_MAX_ITEMS) {
 		count = POPOVER_MAX_ITEMS;
 	}

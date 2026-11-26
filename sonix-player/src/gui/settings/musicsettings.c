@@ -21,6 +21,7 @@
 #include "src/gui/settings/listenbrainzsettings.h"
 #include "src/gui/library/medialist.h"
 #include "src/gui/shell/settingsrow.h"
+#include "src/gui/shell/toast.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
 #include "src/system/audio/alsa-controls.h"
@@ -37,6 +38,9 @@
 #include "src/system/core/lang.h"
 #include "src/system/library/library.h"
 #include "src/system/library/metadata.h"
+#include "src/system/library/albumart.h"
+#include "src/system/library/coverfetch.h"
+#include "src/system/net/wifi.h"
 
 lv_obj_t *musicsettings_screen;
 
@@ -1473,6 +1477,374 @@ static void allow_delete_cb(lv_event_t *e) {
 	medialist_set_allow_delete(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
 }
 
+// ---------------------------------------------------------------------------
+// Batch cover download
+//
+// The worker in coverfetch.c owns the network and posts each progress step back
+// here. Nothing in this block runs on that worker except the callback that
+// hands a copy of the progress to gui_post().
+// ---------------------------------------------------------------------------
+
+static lv_obj_t *batch_progress_veil;
+static lv_obj_t *batch_progress_label;
+static coverfetch_progress_t batch_progress;
+static bool batch_active;
+
+static void batch_start(bool retry_only);
+static void batch_start_cb(void *user);
+static void batch_retry_cb(void *user);
+
+static void batch_cancel_cb(lv_event_t *e) {
+	(void)e;
+	coverfetch_batch_cancel();
+	batch_active = false;
+	if (batch_progress_veil) {
+		lv_obj_set_hidden(batch_progress_veil, true);
+	}
+	toast_plain("coverfetch_batch_cancelled");
+}
+
+static void batch_progress_build(void) {
+	if (batch_progress_veil) {
+		return;
+	}
+	batch_progress_veil = lv_obj_create(lv_layer_top());
+	lv_obj_set_size(batch_progress_veil, lv_pct(100), lv_pct(100));
+	lv_obj_set_pos(batch_progress_veil, 0, 0);
+	lv_obj_set_style_bg_color(batch_progress_veil, lv_color_black(), 0);
+	lv_obj_set_style_bg_opa(batch_progress_veil, LV_OPA_60, 0);
+	lv_obj_set_style_border_width(batch_progress_veil, 0, 0);
+	lv_obj_set_style_pad_all(batch_progress_veil, 0, 0);
+	lv_obj_set_scrollable(batch_progress_veil, false);
+	lv_obj_set_clickable(batch_progress_veil, true);
+
+	lv_obj_t *card = lv_obj_create(batch_progress_veil);
+	lv_obj_set_width(card, 320);
+	lv_obj_set_height(card, LV_SIZE_CONTENT);
+	lv_obj_center(card);
+	lv_obj_add_style(card, &theme_style_card, 0);
+	lv_obj_set_style_radius(card, 18, 0);
+	lv_obj_set_style_border_width(card, 0, 0);
+	lv_obj_set_style_shadow_width(card, 0, 0);
+	lv_obj_set_style_pad_all(card, 20, 0);
+	lv_obj_set_style_pad_gap(card, 14, 0);
+	lv_obj_set_scrollable(card, false);
+	lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+	batch_progress_label = lv_label_create(card);
+	lv_obj_set_width(batch_progress_label, lv_pct(100));
+	lv_label_set_long_mode(batch_progress_label, LV_LABEL_LONG_WRAP);
+	lv_obj_add_style(batch_progress_label, &theme_style_text, 0);
+	lv_obj_set_style_text_font(batch_progress_label, &font_ui_22, 0);
+	lv_obj_set_style_text_align(batch_progress_label, LV_TEXT_ALIGN_CENTER, 0);
+
+	lv_obj_t *cancel = lv_btn_create(card);
+	lv_obj_set_width(cancel, lv_pct(100));
+	lv_obj_set_height(cancel, 56);
+	lv_obj_add_style(cancel, &theme_style_switch, 0);
+	lv_obj_set_style_radius(cancel, 12, 0);
+	lv_obj_set_style_border_width(cancel, 0, 0);
+	lv_obj_set_style_shadow_width(cancel, 0, 0);
+	lv_obj_add_event_cb(cancel, batch_cancel_cb, LV_EVENT_CLICKED, NULL);
+	lv_obj_t *cancel_label = lv_label_create(cancel);
+	lv_label_set_text(cancel_label, tr("cancel"));
+	lv_obj_add_style(cancel_label, &theme_style_text, 0);
+	lv_obj_set_style_text_font(cancel_label, &font_ui_22, 0);
+	lv_obj_center(cancel_label);
+}
+
+// An album row already carries one representative track in `path`, so no
+// nested library walk is needed while the index lock is held (a nested one
+// would deadlock). Keep the rows and look up each album's artist afterwards.
+typedef struct {
+	char album[256];
+	char path[1024];
+} batch_candidate_t;
+
+typedef struct {
+	batch_candidate_t *rows;
+	int max;
+	int count;
+} batch_walk_t;
+
+static bool batch_album_cb(const char *name, const char *path, const char *artist, void *user) {
+	(void)artist;
+	batch_walk_t *w = user;
+	if (w->count >= w->max || !path || !path[0]) {
+		return true;
+	}
+	albumart_t art;
+	memset(&art, 0, sizeof(art));
+	bool has_art = albumart_load_for_file(path, &art);
+	albumart_free(&art);
+	if (has_art) {
+		return true;
+	}
+	batch_candidate_t *row = &w->rows[w->count++];
+	snprintf(row->album, sizeof(row->album), "%s", name);
+	snprintf(row->path, sizeof(row->path), "%s", path);
+	return true;
+}
+
+static int batch_collect_jobs(coverfetch_job_t *jobs, int max) {
+	batch_candidate_t *rows = calloc((size_t)max, sizeof(*rows));
+	if (!rows) {
+		return 0;
+	}
+	batch_walk_t walk;
+	memset(&walk, 0, sizeof(walk));
+	walk.rows = rows;
+	walk.max = max;
+	library_for_each(LIBRARY_LIST_ALBUMS, LIBRARY_FILTER_NONE, NULL, batch_album_cb, &walk);
+
+	int count = 0;
+	for (int i = 0; i < walk.count; i++) {
+		char artist[256] = "";
+		library_album_artist(rows[i].album, artist, sizeof(artist));
+		coverfetch_job_t *job = &jobs[count++];
+		snprintf(job->album, sizeof(job->album), "%s", rows[i].album);
+		snprintf(job->artist, sizeof(job->artist), "%s", artist);
+		snprintf(job->path, sizeof(job->path), "%s", rows[i].path);
+		// dir is left empty: coverfetch_save() derives it from the track.
+	}
+	free(rows);
+	return count;
+}
+
+typedef struct {
+	coverfetch_progress_t p;
+} batch_post_t;
+
+static void batch_finish(void) {
+	batch_active = false;
+	if (batch_progress_veil) {
+		lv_obj_set_hidden(batch_progress_veil, true);
+	}
+	char message[200];
+	snprintf(message, sizeof(message), tr("coverfetch_batch_summary"), batch_progress.found, batch_progress.not_found);
+	// Nothing to retry on a clean run: give a plain acknowledgement instead of
+	// an offer to start the same work over again.
+	if (batch_progress.not_found == 0) {
+		confirm_notice("coverfetch_batch_title", message);
+	} else {
+		confirm_show("coverfetch_batch_title", message, "coverfetch_batch_retry", batch_retry_cb, NULL);
+	}
+}
+
+static void batch_progress_post(void *user) {
+	batch_post_t *post = user;
+	batch_progress = post->p;
+	free(post);
+	if (!batch_active) {
+		return;
+	}
+	if (batch_progress.aborted) {
+		// The batch's save gate found the card gone mid-run. No summary: tell
+		// the user plainly and put the progress card away.
+		batch_active = false;
+		if (batch_progress_veil) {
+			lv_obj_set_hidden(batch_progress_veil, true);
+		}
+		gui_notify_no_card();
+		return;
+	}
+	char text[160];
+	snprintf(text, sizeof(text), tr("coverfetch_batch_progress"), batch_progress.done, batch_progress.total,
+			 batch_progress.found, batch_progress.not_found);
+	lv_label_set_text(batch_progress_label, text);
+	if (batch_progress.done >= batch_progress.total) {
+		batch_finish();
+	}
+}
+
+static void batch_progress_cb(const coverfetch_progress_t *p, void *user) {
+	(void)user;
+	batch_post_t *post = calloc(1, sizeof(*post));
+	if (!post) {
+		return;
+	}
+	post->p = *p;
+	if (!gui_post(batch_progress_post, post)) {
+		free(post);
+	}
+}
+
+static void batch_start_cb(void *user) {
+	(void)user;
+	batch_start(false);
+}
+
+static void batch_retry_cb(void *user) {
+	(void)user;
+	batch_start(true);
+}
+
+static void batch_start(bool retry_only) {
+	if (coverfetch_batch_running()) {
+		// A cancelled worker can still be finishing a request. Starting now
+		// would give two workers one progress card and mixed counts.
+		return;
+	}
+	int missing = coverfetch_batch_missing();
+	if (missing <= 0 && !retry_only) {
+		toast_plain("coverfetch_batch_none");
+		return;
+	}
+	int max = missing + 8;
+	coverfetch_job_t *jobs = calloc((size_t)max, sizeof(*jobs));
+	if (!jobs) {
+		toast_error("coverfetch_find_failed");
+		return;
+	}
+	// Every album still without artwork is a candidate. A retry must include
+	// the ones whose download failed or whose request timed out as well as the
+	// cached "not found" ones: the summary counts all of them as misses.
+	int count = batch_collect_jobs(jobs, max);
+	// Clearing after collection forces a fresh search for each retry candidate.
+	if (retry_only) {
+		coverfetch_negative_clear();
+	}
+	if (count <= 0) {
+		free(jobs);
+		toast_plain("coverfetch_batch_none");
+		return;
+	}
+
+	memset(&batch_progress, 0, sizeof(batch_progress));
+	batch_progress.total = count;
+	batch_progress_build();
+	char text[160];
+	snprintf(text, sizeof(text), tr("coverfetch_batch_progress"), 0, count, 0, 0);
+	lv_label_set_text(batch_progress_label, text);
+	lv_obj_set_hidden(batch_progress_veil, false);
+	lv_obj_move_foreground(batch_progress_veil);
+	// Set up first: the worker can post its first step before the call returns,
+	// and a post seen before the flag is up would be dropped.
+	batch_active = true;
+
+	// coverfetch_batch_run() copies the jobs, so this array can go now.
+	bool started = coverfetch_batch_run(jobs, count, batch_progress_cb, NULL);
+	free(jobs);
+	if (!started) {
+		// Refused or failed to start: no worker will post anything, so don't
+		// leave a progress card stuck at zero with no way to clear it.
+		batch_active = false;
+		if (batch_progress_veil) {
+			lv_obj_set_hidden(batch_progress_veil, true);
+		}
+		toast_error("coverfetch_find_failed");
+		return;
+	}
+}
+
+static void batch_count_then_start(void *user) {
+	(void)user;
+	int missing = coverfetch_batch_missing();
+	if (missing <= 0) {
+		toast_plain("coverfetch_batch_none");
+		return;
+	}
+	char message[120];
+	snprintf(message, sizeof(message), tr("coverfetch_batch_count"), missing);
+	confirm_show("coverfetch_batch_title", message, "coverfetch_batch_download", batch_start_cb, NULL);
+}
+
+// A batch started by turning Wi-Fi on waits for the link the same way the Now
+// Playing search does (player.c: coverfetch_find_wifi_wait). Sending the first
+// request before association is reported as "not found", not retried.
+#define BATCH_WIFI_POLL_MS 500
+#define BATCH_WIFI_WAIT_MS 30000
+
+static lv_timer_t *batch_wifi_timer;
+static uint32_t batch_wifi_since;
+
+static bool batch_wifi_online(void) {
+	wifi_status_t wifi;
+	wifi_get_status(&wifi);
+	return wifi.state == WIFI_STATE_CONNECTED && wifi.ip[0] != '\0';
+}
+
+static void batch_wifi_wait_end(void) {
+	if (batch_wifi_timer) {
+		lv_timer_delete(batch_wifi_timer);
+		batch_wifi_timer = NULL;
+	}
+}
+
+static void batch_wifi_tick_cb(lv_timer_t *t) {
+	(void)t;
+	// Wi-Fi switched off again: the batch is no longer wanted.
+	if (!wifi_get_enabled()) {
+		batch_wifi_wait_end();
+		toast_busy_end();
+		return;
+	}
+	if (batch_wifi_online()) {
+		batch_wifi_wait_end();
+		toast_busy_end();
+		batch_count_then_start(NULL);
+		return;
+	}
+	if (lv_tick_elaps(batch_wifi_since) >= BATCH_WIFI_WAIT_MS) {
+		batch_wifi_wait_end();
+		toast_busy_end();
+		toast_error("coverfetch_batch_no_wifi");
+	}
+}
+
+static void batch_enable_wifi_cb(void *user) {
+	(void)user;
+	wifi_set_enabled(true);
+	batch_wifi_since = lv_tick_get();
+	if (!batch_wifi_timer) {
+		batch_wifi_timer = lv_timer_create(batch_wifi_tick_cb, BATCH_WIFI_POLL_MS, NULL);
+	}
+	toast_busy_dismissable("coverfetch_find_searching");
+}
+
+// Leaving the page while a batch is running stops it; whatever has already
+// been written stays on the card.
+static bool batch_back_guard(void) {
+	if (batch_wifi_timer) {
+		batch_wifi_wait_end(); // leaving the page drops a pending link-up wait
+		toast_busy_end();
+	}
+	if (!batch_active) {
+		return false;
+	}
+	coverfetch_batch_cancel();
+	batch_active = false;
+	if (batch_progress_veil) {
+		lv_obj_set_hidden(batch_progress_veil, true);
+	}
+	return false;
+}
+
+static void coverfetch_batch_row_cb(lv_event_t *e) {
+	(void)e;
+	if (batch_wifi_timer) {
+		toast_busy_dismissable("coverfetch_find_searching");
+		return;
+	}
+	if (!gui_card_available()) {
+		gui_notify_no_card();
+		return;
+	}
+	wifi_status_t wifi;
+	wifi_get_status(&wifi);
+	if (wifi.state != WIFI_STATE_CONNECTED) {
+		if (wifi_available() && !wifi_get_enabled()) {
+			confirm_show("coverfetch_batch_wifi_title", "coverfetch_batch_wifi_note", "coverfetch_batch_enable_wifi",
+						 batch_enable_wifi_cb, NULL);
+		} else {
+			toast_error("coverfetch_batch_no_wifi");
+		}
+		return;
+	}
+	batch_count_then_start(NULL);
+}
+
 static void build_library_page(gui_config_t *cfg) {
 	library_screen = lv_obj_create(NULL);
 	lv_obj_t *container = settingsrow_page(library_screen, cfg, "musicsettings_library");
@@ -1546,6 +1918,14 @@ static void build_library_page(gui_config_t *cfg) {
 		lv_obj_add_state(allow_delete_switch, LV_STATE_CHECKED);
 	}
 
+	// Fill in album covers the library is missing, one album at a time. The
+	// worker re-checks the card immediately before every write; the check stays
+	// here so coverfetch.c keeps no GUI dependency.
+	coverfetch_batch_set_save_gate(gui_card_available);
+	settingsrow_action(container, "coverfetch_batch_title", coverfetch_batch_row_cb, NULL);
+	option_note(container, "coverfetch_batch_note");
+
+	switcher_set_back_guard(library_screen, batch_back_guard);
 	switcher_attach_back_gesture(library_screen);
 }
 

@@ -20,6 +20,7 @@
 #include "src/system/audio/audio.h"
 #include "src/system/audio/headset.h"
 #include "src/system/library/audiobookdb.h"
+#include "src/system/library/coverfetch.h"
 #include "src/system/device/clock.h"
 #include "src/system/playback/device_state.h"
 #include "src/system/remote/dlna.h"
@@ -642,7 +643,8 @@ static bool wifi_in_use(void) {
 		   wifitransfer_get_enabled() || qobuzcache_downloading_id() > 0 ||
 		   qobuzcache_network_wanted() || tidalcache_downloading_id() > 0 || tidalcache_network_wanted() ||
 		   podcastcache_downloading_id() > 0 || podcastcache_network_wanted() || podcastdl_busy() ||
-		   lastfm_network_wanted() || listenbrainz_network_wanted() || ota_busy();
+		   lastfm_network_wanted() || listenbrainz_network_wanted() || coverfetch_busy() || // a scrobble or cover batch is on the network
+		   ota_busy();
 }
 
 // Pushes the next suspend attempt out by the anti-hammer delay. A radio that has
@@ -699,6 +701,7 @@ static bool player_is_busy(bool playing, uint32_t input_idle) {
 		   audiobookdb_scan_running() || wifitransfer_running() || dlna_running() || airplay_running() ||
 		   sonixlink_is_connected() || // a phone driving the player, not a switch left on
 		   qobuzcache_downloading_id() > 0 || tidalcache_downloading_id() > 0 || podcastcache_downloading_id() > 0 ||
+		   coverfetch_busy() || // a cover write must not be frozen by suspend
 		   ota_busy(); // a firmware update being fetched
 }
 

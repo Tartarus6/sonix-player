@@ -26,8 +26,11 @@
 // caller's thread forever -- which is exactly what a dead radio station does.
 
 // What the server is told this client is. radio-browser.info asks for a
-// descriptive agent of the form appname/version.
-#define HTTP_USER_AGENT "SonixPlayer/1.0"
+// descriptive agent of the form appname/version; MusicBrainz asks API clients
+// for appname/version with a contact URL or email so maintainers can reach
+// them. http.c always sends this header itself, so callers must not add a
+// second User-Agent through extra_headers.
+#define HTTP_USER_AGENT "SonixPlayer/1.0 (https://github.com/Tartarus6/sonix-player)"
 
 // Fetches `url` into a freshly malloc'd, NUL-terminated buffer. The caller
 // frees it. `out_len` may be NULL. Redirects (301/302/303/307/308) are

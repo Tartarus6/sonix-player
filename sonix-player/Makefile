@@ -399,6 +399,21 @@ compile_commands.json:
 clean:
 	rm -rf build_host build_target build_gen $(HOST_BIN) $(TARGET_BIN) $(TARGET_DEBUG_BIN) $(LAUNCH_BIN) compile_commands.json compile_flags.txt
 
+# ---------------------------------------------------------------------------
+# The cover fetch client, on the host, against stubbed HTTP and the real JSON
+# parser. Test-only: nothing here is part of the host or target builds.
+# ---------------------------------------------------------------------------
+COVERFETCH_TEST_BIN = build_host/test_coverfetch
+.PHONY: test-coverfetch
+test-coverfetch: $(COVERFETCH_TEST_BIN)
+	$(COVERFETCH_TEST_BIN)
+
+$(COVERFETCH_TEST_BIN): tools/test_coverfetch.c src/system/library/coverfetch.c \
+		src/system/library/coverfetch.h src/system/library/coverfetch_test.h \
+		src/system/core/json.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DHOST_BUILD=1 -DCOVERFETCH_TEST=1 -o $@ \
+		tools/test_coverfetch.c src/system/library/coverfetch.c src/system/core/json.c -lpthread
 # The bundled libraries and their extracted sources. The downloaded tarballs stay.
 .PHONY: libs-clean
 libs-clean:
