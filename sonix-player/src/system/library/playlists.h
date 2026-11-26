@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <time.h>
 
 // User playlists.
 //
@@ -130,10 +131,12 @@ typedef struct {
 	char path[512]; // the file itself
 	enum PlaylistLocation playlist_location; // a backup, rather than a loose file at the root
 	bool exists; // a playlist already answers to `name`: importing replaces it
+	time_t modified; // file mtime, to decide which copy of a name to keep
 } playlists_candidate_t;
 
-// Fills `out` with at most `max` importable playlists, by name. Returns how
-// many were written.
+// Fills `out` with at most `max` importable playlists, by name -- one candidate
+// per name, even when several folders hold a copy. Returns how many were
+// written.
 int playlists_importable(playlists_candidate_t *out, int max);
 
 // Up to this many of a playlist's unresolved entries are named in its report.

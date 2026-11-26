@@ -6985,12 +6985,17 @@ static bool playlist_table_exists_locked(const char *name) {
 	if (!db) {
 		return false;
 	}
-	// By value, not by name in the statement: this one can be bound.
+	// By value, not by name in the statement: this one can be bound. Table
+	// identifiers are case-insensitive to SQLite, so "hits" and "Hits" are the
+	// same playlist table: the check has to use the same comparison or a
+	// differently-cased import would append to the existing table without
+	// being seen as a replacement.
 	snprintf(table, sizeof(table), LIBRARY_PLAYLIST_PREFIX "%s", name);
 	sqlite3_stmt *stmt = NULL;
 	bool found = false;
-	if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", -1, &stmt, NULL) ==
-		SQLITE_OK) {
+	if (sqlite3_prepare_v2(db,
+						   "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? COLLATE NOCASE", -1, &stmt,
+						   NULL) == SQLITE_OK) {
 		sqlite3_bind_text(stmt, 1, table, -1, SQLITE_TRANSIENT);
 		found = sqlite3_step(stmt) == SQLITE_ROW;
 		sqlite3_finalize(stmt);

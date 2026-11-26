@@ -821,13 +821,43 @@ static void consider_candidate(const char *folder, const char *file_name, enum P
 	if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) {
 		return;
 	}
+	char name[201];
+	name_from_file(file_name, name, sizeof(name));
+
+	// The three folders can hold copies of the same list -- a backup beside a
+	// copy at the root, for example. Offering both would import the second one
+	// over the first: with replace=true it takes the name just created, drops
+	// it and renames itself in, so one of the two selected files is silently
+	// lost. Keep one candidate per name, the most recently changed copy; when
+	// the timestamps match, the copy found first (root, then backup, then
+	// playlist_data) stays.
+	for (int i = 0; i < *count; i++) {
+		if (strcasecmp(out[i].name, name) != 0) {
+			continue;
+		}
+		if (st.st_mtime <= out[i].modified) {
+			return;
+		}
+		// The name must follow the winning file: playlists_import() derives
+		// the playlist name from the path, so keeping the first copy's name
+		// would leave `name` and `exists` describing a file that is not the
+		// one imported (and would misstate the overwrite warning).
+		copy_capped(out[i].name, sizeof(out[i].name), name);
+		copy_capped(out[i].path, sizeof(out[i].path), full);
+		out[i].playlist_location = playlist_location;
+		out[i].modified = st.st_mtime;
+		out[i].exists = library_playlist_exists(out[i].name);
+		return;
+	}
+
 	playlists_candidate_t *slot = &out[*count];
-	name_from_file(file_name, slot->name, sizeof(slot->name));
+	copy_capped(slot->name, sizeof(slot->name), name);
 	// A file named like a playlist that is already there is offered all the
 	// same, marked, since importing it replaces that playlist.
 	slot->exists = library_playlist_exists(slot->name);
 	copy_capped(slot->path, sizeof(slot->path), full);
 	slot->playlist_location = playlist_location;
+	slot->modified = st.st_mtime;
 	(*count)++;
 }
 

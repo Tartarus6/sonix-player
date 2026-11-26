@@ -399,6 +399,23 @@ compile_commands.json:
 clean:
 	rm -rf build_host build_target build_gen $(HOST_BIN) $(TARGET_BIN) $(TARGET_DEBUG_BIN) $(LAUNCH_BIN) compile_commands.json compile_flags.txt
 
+# Host test for playlist import de-duplication: two copies of one name that
+# differ only in case must yield one candidate named after the winning file,
+# with a matching overwrite flag. Unused parts of the two library files are
+# discarded with --gc-sections; only the two small utils stubs in the test are
+# needed to link it.
+DEDUP_TEST_BIN = build_host/playlist_dedup_test
+.PHONY: test-playlist-dedup
+test-playlist-dedup: $(DEDUP_TEST_BIN)
+	./$(DEDUP_TEST_BIN)
+
+$(DEDUP_TEST_BIN): tools/playlist_dedup_test.c src/system/library/playlists.c src/system/library/library.c \
+				   src/system/library/playlists.h src/system/library/library.h
+	@mkdir -p $(dir $@)
+	$(CC) -std=gnu11 -O2 -Wall -Wextra -D_FILE_OFFSET_BITS=64 -I. -ffunction-sections -fdata-sections \
+		tools/playlist_dedup_test.c src/system/library/playlists.c src/system/library/library.c \
+		$(shell pkg-config --cflags --libs sqlite3) -pthread -Wl,--gc-sections -lm -o $@
+
 # The bundled libraries and their extracted sources. The downloaded tarballs stay.
 .PHONY: libs-clean
 libs-clean:
