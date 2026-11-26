@@ -104,6 +104,10 @@ const char *ebook_path(const ebook_t *book);
 // Japanese face rather than Bookerly, which has no kana or kanji.
 bool ebook_is_japanese(const ebook_t *book);
 
+// A book whose dc:language is Korean ("ko", "ko-KR"), used to guide ebook
+// font selection.
+bool ebook_is_korean(const ebook_t *book);
+
 // A Japanese book whose spine runs right to left: set in vertical columns, read
 // from the right, and turned towards the left. The spine's
 // page-progression-direction is what says so; a Japanese book without it is

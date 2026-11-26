@@ -145,6 +145,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 - EPUB 2 and 3, with covers, pictures, headings, lists, quotes and the table of contents.
 - Japanese books that are written vertically are shown vertically.
+- Korean, Japanese, Chinese, Thai, Arabic, Devanagari, Tamil, Malayalam, Gurmukhi, Ethiopic and Hebrew letters are drawn with the bundled fonts instead of `▯`. The six new script faces are unhinted subsets of their Unicode blocks; titles in those languages use the regular weight. Scripts that need joining or reordering are not shaped yet.
 - Text size, line spacing, word spacing and margins.
 - Three reading themes (Paper, Sepia, Night) and three page-turn animations.
 - **Bookmarks** - double tap the top of a page. Up to 64 per book.

@@ -67,6 +67,12 @@ bool ebook_is_japanese(const ebook_t *book) {
 		   (lang[2] == '\0' || lang[2] == '-' || lang[2] == '_');
 }
 
+bool ebook_is_korean(const ebook_t *book) {
+	const char *lang = book && book->language ? book->language : "";
+	return (lang[0] == 'k' || lang[0] == 'K') && (lang[1] == 'o' || lang[1] == 'O') &&
+		   (lang[2] == '\0' || lang[2] == '-' || lang[2] == '_');
+}
+
 bool ebook_is_vertical(const ebook_t *book) { return book && book->rtl && ebook_is_japanese(book); }
 uint32_t ebook_spine_count(const ebook_t *book) { return book ? book->spine_count : 0; }
 uint32_t ebook_toc_count(const ebook_t *book) { return book ? book->toc_count : 0; }

@@ -2697,7 +2697,7 @@ void ebookreader_open(const char *path) {
 	}
 
 	tategaki = ebook_is_vertical(book);
-	ebookfonts_open(g_cfg->sd_root_path, opt_size, ebook_is_japanese(book));
+	ebookfonts_open(g_cfg->sd_root_path, opt_size, ebook_is_japanese(book), ebook_is_korean(book));
 	choose_word_gap();
 
 	// The strip may have grown or shrunk since the last book: its options live
