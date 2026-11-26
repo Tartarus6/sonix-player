@@ -1,5 +1,6 @@
 #include "theme.h"
 
+#include "src/gui/shell/theme_color.h"
 #include "src/system/device/bootlogo.h"
 #include "src/system/core/config.h"
 
@@ -16,6 +17,7 @@ lv_style_t theme_style_icon;
 lv_style_t theme_style_switch;		   // switch track, off state
 lv_style_t theme_style_switch_checked; // switch indicator, on state
 lv_style_t theme_style_accent_bg;	   // anything that must follow the accent
+lv_style_t theme_style_on_accent;	   // text/image foreground on that fill
 lv_style_t theme_style_slider_track;   // a slider's unfilled part
 
 // GNOME Adwaita (libadwaita) colours, dark variant: window #242424, cards
@@ -78,6 +80,13 @@ static const lv_color_t ACCENT_COLORS[THEME_ACCENT_COUNT] = {
 };
 static int accent_index;
 
+// The user's own accent, chosen on the picker page. `custom_active` says
+// whether it is the one in force; the colour itself is kept even while a
+// preset is selected, so turning custom back on does not lose it. The
+// picker itself seeds from whichever accent is live.
+static bool custom_active;
+static lv_color_t custom_color;
+
 lv_color_t theme_accent_preset(int index) {
 	if (index < 0 || index >= THEME_ACCENT_COUNT) {
 		index = 0;
@@ -86,6 +95,14 @@ lv_color_t theme_accent_preset(int index) {
 }
 
 int theme_get_accent(void) { return accent_index; }
+
+bool theme_accent_is_custom(void) { return custom_active; }
+
+lv_color_t theme_accent_custom_color(void) { return custom_color; }
+
+lv_color_t theme_accent_color(void) { return active->accent; }
+
+lv_color_t theme_on_accent(void) { return theme_color_on(active->accent); }
 
 // Callers asking to be called back after a theme or accent change. The list
 // grows on demand and has no fixed limit: a dropped registration shows up only
@@ -185,6 +202,9 @@ static void apply_palette(void) {
 	lv_style_set_bg_color(&theme_style_switch_checked, active->accent);
 
 	lv_style_set_bg_color(&theme_style_accent_bg, active->accent);
+	lv_color_t on_accent = theme_on_accent();
+	lv_style_set_text_color(&theme_style_on_accent, on_accent);
+	lv_style_set_image_recolor(&theme_style_on_accent, on_accent);
 	lv_style_set_bg_color(&theme_style_slider_track, active->text_secondary);
 }
 
@@ -218,6 +238,8 @@ void theme_init(void) {
 
 	lv_style_init(&theme_style_accent_bg);
 	lv_style_set_bg_opa(&theme_style_accent_bg, LV_OPA_COVER);
+	lv_style_init(&theme_style_on_accent);
+	lv_style_set_image_recolor_opa(&theme_style_on_accent, LV_OPA_COVER);
 	lv_style_init(&theme_style_slider_track);
 	lv_style_set_bg_opa(&theme_style_slider_track, LV_OPA_40);
 	lv_style_set_radius(&theme_style_slider_track, LV_RADIUS_CIRCLE);
@@ -230,8 +252,23 @@ void theme_init(void) {
 	if (accent_index < 0 || accent_index >= THEME_ACCENT_COUNT) {
 		accent_index = 0;
 	}
-	palette_dark.accent = ACCENT_COLORS[accent_index];
-	palette_light.accent = ACCENT_COLORS[accent_index];
+
+	// A custom colour rides beside the preset. A missing or damaged value is
+	// not an error: the player simply comes up on the preset, never on no
+	// accent at all.
+	custom_color = ACCENT_COLORS[accent_index];
+	custom_active = config_get_bool("ui", "accent_custom", false);
+	if (custom_active) {
+		lv_color_t stored;
+		if (theme_color_parse_rgb(config_get_int("ui", "accent_rgb", -1), &stored)) {
+			custom_color = stored;
+		} else {
+			custom_active = false;
+		}
+	}
+
+	palette_dark.accent = custom_active ? custom_color : ACCENT_COLORS[accent_index];
+	palette_light.accent = palette_dark.accent;
 
 	dynamic_tint = config_get_bool("ui", "dynamic_tint", false);
 
@@ -392,6 +429,7 @@ void theme_set_accent(int index) {
 	if (index < 0 || index >= THEME_ACCENT_COUNT) {
 		index = 0;
 	}
+	custom_active = false;
 	accent_index = index;
 	palette_dark.accent = ACCENT_COLORS[index];
 	palette_light.accent = ACCENT_COLORS[index];
@@ -399,10 +437,66 @@ void theme_set_accent(int index) {
 	apply_palette();
 
 	config_set_int("ui", "accent", index);
+	config_set_bool("ui", "accent_custom", false);
 	config_save();
 
 	bootlogo_follow(active->dark, accent_index);
 
+	refresh_all();
+}
+
+// The picker's live preview: the interface follows the finger, but nothing is
+// written. In particular bootlogo_follow() stays out of this path -- the
+// marker on the flash is an erase cycle, and a slider drag is not one.
+void theme_preview_accent(lv_color_t color) {
+	palette_dark.accent = color;
+	palette_light.accent = color;
+	rebuild_active();
+	apply_palette();
+	refresh_all();
+}
+
+void theme_set_accent_custom(lv_color_t color) {
+	// OK on an untouched picker is not a change: no config write, no NAND
+	// erase. The palette is still applied below -- the picker may have
+	// previewed another colour and come back to this one.
+	bool unchanged = custom_active && color.red == custom_color.red && color.green == custom_color.green &&
+					 color.blue == custom_color.blue;
+
+	custom_color = color;
+	custom_active = true;
+
+	palette_dark.accent = color;
+	palette_light.accent = color;
+
+	// The boot logo is artwork per preset, so a custom accent picks the
+	// closest one. A grey has no hue to match; there, the preset the user was
+	// on is the least surprising answer.
+	if (theme_color_saturation(color) >= 16) {
+		accent_index = theme_color_nearest(ACCENT_COLORS, THEME_ACCENT_COUNT, color);
+	}
+
+	rebuild_active();
+	apply_palette();
+
+	config_set_int("ui", "accent", accent_index);
+	config_set_bool("ui", "accent_custom", true);
+	config_set_int("ui", "accent_rgb",
+				   ((long)color.red << 16) | ((long)color.green << 8) | (long)color.blue);
+	if (!unchanged) {
+		config_save();
+		bootlogo_follow(active->dark, accent_index);
+	}
+
+	refresh_all();
+}
+
+void theme_restore_accent(void) {
+	lv_color_t color = custom_active ? custom_color : ACCENT_COLORS[accent_index];
+	palette_dark.accent = color;
+	palette_light.accent = color;
+	rebuild_active();
+	apply_palette();
 	refresh_all();
 }
 
