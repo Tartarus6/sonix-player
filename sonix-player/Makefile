@@ -229,11 +229,22 @@ HOST_OBJS = $(APP_SRCS:src/%.c=build_host/%.o) $(APP_CXX_SRCS:src/%.cpp=build_ho
 TARGET_OBJS = $(APP_SRCS:src/%.c=build_target/%.o) $(APP_CXX_SRCS:src/%.cpp=build_target/%.opp) \
 			  $(LVGL_SRCS:$(LVGL_DIR)/%.c=build_target/lvgl/%.o)
 
-.PHONY: all host target clean compile_commands.json
+.PHONY: all host target clean compile_commands.json test-mseb-clip
 
 all: host compile_commands.json
 
 host: $(HOST_BIN) compile_commands.json
+
+# DSP regression harness: includes eq.c directly with stub config symbols, so
+# it needs none of the audio or graphics libraries the host build links.
+TEST_MSEB_CLIP_BIN = build_host/mseb_clip_test
+
+test-mseb-clip: $(TEST_MSEB_CLIP_BIN)
+	$(TEST_MSEB_CLIP_BIN)
+
+$(TEST_MSEB_CLIP_BIN): tools/mseb_clip_test.c src/system/audio/eq.c src/system/audio/eq.h
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -Wall -Wextra -D_FILE_OFFSET_BITS=64 -I. $< -lm -o $@
 
 $(HOST_BIN): $(HOST_OBJS)
 	$(HOST_LD) -o $@ $(HOST_OBJS) $(HOST_LDFLAGS)
