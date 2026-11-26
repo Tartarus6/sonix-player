@@ -169,7 +169,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **DLNA** - send music to the player from an app on your phone (needs a microSD card).
 - **Wi-Fi transfer** - open `sonix-transfer.local` (or the address on screen) in a browser on the same Wi-Fi to upload files and folders, download, rename, move and delete, and see hidden files. Music stops while it is on.
 - **SonixLink** - control the player from the SonixLink app on your phone, over Wi-Fi or Bluetooth: browse the library, the queue and the favourites, with covers.
-- **USB storage** - with the player on, connect it to a computer or a phone with the cable and the microSD shows up as a drive. With Detect changes on, the library picks up the new music when you unplug it.
+- **USB storage** - with the player on, connect it to a computer or a phone with the cable and the microSD shows up as a drive. With Detect changes on, the library picks up the new music when you unplug it. **R1 only:** storage also comes up when the player was asleep. It wakes briefly to check for a cable, and you choose how often in Settings > Power: every 15 s, 30 s or 60 s, or turn the check off. The wake can take up to the chosen interval, and a shorter interval uses more battery.
 
 ## Control centre and status bar
 
