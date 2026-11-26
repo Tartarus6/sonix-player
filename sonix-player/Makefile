@@ -399,6 +399,20 @@ compile_commands.json:
 clean:
 	rm -rf build_host build_target build_gen $(HOST_BIN) $(TARGET_BIN) $(TARGET_DEBUG_BIN) $(LAUNCH_BIN) compile_commands.json compile_flags.txt
 
+# ---------------------------------------------------------------------------
+# SD-card update checks on the host. Test-only: no part of host or target.
+# ---------------------------------------------------------------------------
+FIRMWARE_TEST_BIN = build_host/test_firmware_update
+.PHONY: test-firmware-update
+test-firmware-update: $(FIRMWARE_TEST_BIN)
+	$(FIRMWARE_TEST_BIN)
+
+$(FIRMWARE_TEST_BIN): tests/firmware_update_test.c src/system/device/firmware.c \
+		src/system/device/firmware.h src/system/device/ota.h src/system/core/sha256.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DHOST_BUILD=1 -o $@ \
+		tests/firmware_update_test.c src/system/device/firmware.c src/system/core/sha256.c
+
 # The bundled libraries and their extracted sources. The downloaded tarballs stay.
 .PHONY: libs-clean
 libs-clean:

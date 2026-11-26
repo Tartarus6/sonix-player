@@ -10,6 +10,15 @@ LVGL.
 
 Everything it can do is in **[FEATURES.md](FEATURES.md)**.
 
+## Before you update
+
+Do these four things before you flash an image:
+
+1. Charge the player above 30%. A flash that loses power can leave the device unbootable.
+2. Back up the microSD card and your playlists. Copy them to a computer first.
+3. Keep a known-good stock recovery image for your exact model. Use `r1.upt` for the R1 and `r3proii.upt` for the R3 Pro II.
+4. Check the file name on the card. The R1 takes `r1.upt`, and the R3 Pro II takes `r3proii.upt`. Sonix Player refuses an image named for the other model.
+
 ## Install
 
 1. Download the firmware for your player from the
@@ -31,8 +40,11 @@ Once Sonix Player is installed, later versions can be installed straight from
 the player: Settings > System > Update firmware > Via internet downloads the
 right file from the latest release by itself.
 
-> **Going back to the stock firmware:** flash the original firmware from
-> HiBy's website the same way.
+### Going back to the stock firmware
+
+Flash the original firmware from HiBy's website the same way. Use the image for your exact model. Firmware images are not interchangeable, and flashing the other model's image can leave the player unable to boot.
+
+If Sonix Player no longer starts, boot the stock recovery and flash the stock image from the card. On both the R1 and the R3 Pro II, hold **Power + Volume Up** while the player boots, then run the stock update from the microSD card. Keep the known-good stock image from the checklist on your computer before you need it.
 
 ---
 
@@ -477,7 +489,7 @@ the overlay - any other file need to be in the respective folder mirroring the r
 4. Let it flash - it will say "Upgrading..." then "Succeeded" and reboot by itself.
 
 > It is recommended to **charge above 30%** first. 
-**Recovery from a failed flash:** If something goes wrong, you can always restore by flashing the original stock firmware from HiBy's website using the same procedure.
+**Recovery from a failed flash:** Follow the rollback steps above. Both models enter stock recovery with **Power + Volume Up**.
 
 
 ## Generated files

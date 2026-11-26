@@ -497,6 +497,19 @@ static ota_result_t do_download(void) {
 		unlink(part_path);
 		return OTA_DOWNLOAD_FAILED;
 	}
+
+	// The release digest proves the bytes match GitHub, not that the image is
+	// for this model. Check before arming recovery and remove a refused file:
+	// stock recovery looks for exactly this name and would flash it if the
+	// user entered recovery by hand.
+	ota_result_t model = firmware_update_prepare(final_path);
+	if (model != OTA_OK) {
+		printf("ota: downloaded image refused (result %d), removing %s\n", model, final_path);
+		unlink(final_path);
+		sync();
+		return model;
+	}
+
 	sync();
 	printf("ota: %s ready (%ld bytes%s)\n", final_path, done, release.sha256[0] ? ", sha256 matches" : "");
 	return OTA_OK;

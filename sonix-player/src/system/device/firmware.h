@@ -4,6 +4,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "src/system/core/sha256.h"
+#include "src/system/device/ota.h"
+
 // Firmware update from the microSD card -- the same two steps the stock
 // player does, and nothing more. An update from the internet (ota.h) puts the
 // file on the card first and then takes the same path.
@@ -43,6 +46,25 @@ const char *firmware_update_stem(void);
 // "r3proii.upt" -- in any mixture of upper and lower case; nothing else is
 // accepted, "update.upt" included.
 bool firmware_update_file_find(char *out, size_t out_size);
+
+// Checks an image before recovery is armed. The file name must be this
+// model's, and the image must carry this model's name in its payload: the
+// recovery kernel flashes whatever it is handed, so a wrong image renamed to
+// the right file name would otherwise brick the player.
+//
+// OTA_OK means the image passed. OTA_MODEL_MISMATCH names a file for another
+// player, OTA_NO_MODEL a build that cannot name its own image.
+ota_result_t firmware_update_model_check(const char *path);
+
+// SHA-256 of a file, lower-case hex in `out`. False when the file cannot be
+// read. The manual update path uses this to record the digest of the image it
+// is about to flash, the same hash the OTA path checks against GitHub.
+bool firmware_file_sha256(const char *path, char out[SHA256_HEX_LEN]);
+
+// The one check both update paths run before recovery is armed. It performs
+// the model check and logs the image's SHA-256. OTA_OK means recovery may be
+// armed; any other result names why it must wait.
+ota_result_t firmware_update_prepare(const char *path);
 
 // Arms recovery and reboots into it. Does not return on the device.
 //
