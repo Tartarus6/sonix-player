@@ -49,4 +49,9 @@ const lv_image_dsc_t *music_tile_icon(music_tile_t tile);
 // The page's tiles made again from the saved order.
 void music_rebuild_tiles(void);
 
+// The Pixel look of the page (pixellibrary.h) in place of the tiles. Off by
+// default; saved in the config as [library] pixel_page.
+bool music_pixel_page(void);
+void music_set_pixel_page(bool on);
+
 #endif /* MUSIC_H */

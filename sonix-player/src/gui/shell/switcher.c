@@ -711,6 +711,12 @@ void back_btn_tint_on_screen(lv_obj_t *screen, bool on, lv_color_t color) {
 // exit is the menu, and an arrow drawn over the frame would be a control the
 // touchscreen (which belongs to the emulator then) delivers to nobody.
 static bool chevron_forced_hidden;
+static bool chevron_hidden_in_player;
+
+void back_btn_hidden_in_player(bool hidden) {
+	chevron_hidden_in_player = hidden;
+	back_btn_sync_visibility();
+}
 
 void back_btn_force_hidden(bool hidden) {
 	chevron_forced_hidden = hidden;
@@ -740,7 +746,7 @@ void back_btn_sync_visibility(void) {
 		return;
 	}
 	if (player_sheet_is_open()) {
-		lv_obj_set_hidden(back_btn, false);
+		lv_obj_set_hidden(back_btn, chevron_hidden_in_player);
 		return;
 	}
 	if (page_has_no_chevron(lv_screen_active())) {
@@ -764,7 +770,7 @@ void back_btn_player_mode(bool in_player) {
 	if (chevron_forced_hidden) {
 		lv_obj_set_hidden(back_btn, true);
 	} else if (in_player) {
-		lv_obj_set_hidden(back_btn, false);
+		lv_obj_set_hidden(back_btn, chevron_hidden_in_player);
 	} else if (page_has_no_chevron(lv_screen_active())) {
 		lv_obj_set_hidden(back_btn, true);
 	}
