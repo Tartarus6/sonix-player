@@ -852,6 +852,12 @@ bool http_request(const char *url, const http_req_t *req, char **out, size_t *ou
 		} else {
 			snprintf(current, sizeof(current), "%s", location);
 		}
+		// A credential in the request headers must not be re-sent over plain
+		// HTTP after an https:// redirect. Opt-in so no other caller changes.
+		if (req->no_https_downgrade && u.secure && strncasecmp(current, "http://", 7) == 0) {
+			set_last_error("https_downgrade_blocked");
+			return false;
+		}
 	}
 	return false;
 }

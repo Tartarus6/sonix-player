@@ -73,6 +73,12 @@ bool btplayer_command_is_duplicate(void) {
 // ---------------------------------------------------------------------------
 
 static const char *status_now(void) {
+	// During the silent keep-alive we are streaming (START was sent and the
+	// transport is ACTIVE). Telling the car "Stopped" makes some head units
+	// close the A2DP link a few seconds later, so report the stream as playing.
+	if (audio_bt_keepalive_active()) {
+		return "Playing";
+	}
 	switch (audio_get_status()) {
 	case AUDIO_STATUS_PLAYING:
 		return "Playing";
@@ -228,6 +234,10 @@ static void on_call(dbus_conn_t *c, const dbus_msg_t *m, void *user) {
 				dbus_w_variant_string(w, status_now());
 			} else if (strcmp(prop, "LoopStatus") == 0) {
 				dbus_w_variant_string(w, "None");
+			} else if (strcmp(prop, "Position") == 0) {
+				// MPRIS milliseconds are int64; answering bool here makes
+				// BlueZ reject the whole player.
+				dbus_w_variant_i64(w, 0);
 			} else if (strcmp(prop, "CanSeek") == 0 || strcmp(prop, "Shuffle") == 0) {
 				dbus_w_variant_bool(w, false);
 			} else {

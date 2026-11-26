@@ -14,4 +14,9 @@
 
 void fwupdate_show(void);
 
+// V1 update notice: start the download of the release ota_release() holds,
+// bringing the update card up if it is not already. Used by ota_auto.c; other
+// models never call it.
+void fwupdate_start_download(void);
+
 #endif /* FWUPDATE_H */

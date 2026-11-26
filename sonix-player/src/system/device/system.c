@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "src/gui/board_profile.h"
 #include "src/gui/nowplaying/cover.h"
 #include "src/gui/settings/screensaver.h"
 #include "src/gui/shell/gui.h"
@@ -50,7 +51,8 @@
 #include "src/system/device/screenshot.h"
 #include "src/system/device/sysserver.h"
 #include "src/system/core/utils.h"
-#include "src/system/core/utils.h"
+#include "src/system/core/config.h"
+#include "src/system/device/batteryhistory.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -287,6 +289,17 @@ void sync_battery_from_sysfs(void) {
 		strcpy(battery_cache, "!!");
 	} else {
 		snprintf(battery_cache, sizeof(battery_cache), "%d", percent);
+	}
+
+	// V1 only: record the fork's charge/discharge history from the reading the
+	// status bar just took. This writes settings, never a charging register,
+	// and the two HiBy models do not call it at all.
+	if (bp_is_compact()) {
+		int level = -1;
+		if (battery_cache[0] >= '0' && battery_cache[0] <= '9') {
+			level = atoi(battery_cache);
+		}
+		batteryhistory_tick(level, battery_charging_cache, (int)config_get_int("power", "charge_limit", 100));
 	}
 }
 

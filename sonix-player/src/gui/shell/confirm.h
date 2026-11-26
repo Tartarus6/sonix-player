@@ -24,4 +24,11 @@ void confirm_notice(const char *title, const char *message);
 
 void confirm_close(void);
 
+// The same card with a named action on the cancel button. Used by the V1
+// update notice ("Update" / "Later"): both answers have to do something, and
+// the quiet one still has to close the card. Other callers keep confirm_show().
+void confirm_show_with_cancel(const char *title, const char *message, const char *ok_label,
+							  void (*on_ok)(void *user), void *user, const char *cancel_label,
+							  void (*on_cancel)(void *user), void *cancel_user);
+
 #endif /* CONFIRM_H */

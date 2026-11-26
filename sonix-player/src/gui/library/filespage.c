@@ -171,8 +171,8 @@ static bool ext_in(const char *ext, const char *const *list) {
 }
 
 static const char *const EXT_AUDIO[] = {"iso", "dff", "dsf", "dts", "ape", "flac", "aif", "aiff", "wav",
-										"m4a", "aac", "mp2", "mp3", "ogg", "oga", "wma", "opus", "dsd",
-										"wv",  "mpc", "tak", "tta", NULL};
+										"rf64", "w64", "m4a", "aac", "mp2", "mp3", "ogg", "oga", "wma", "opus",
+										"dsd", "wv", "mpc", "tak", "tta", NULL};
 static const char *const EXT_AUDIOBOOK[] = {"m4b", "aa", "aax", NULL};
 static const char *const EXT_PLAYLIST[] = {"m3u", "m3u8", "cue", NULL};
 static const char *const EXT_IMAGE[] = {"bmp", "png", "jpg", "jpeg", "gif", "webp", NULL};

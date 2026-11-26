@@ -296,6 +296,12 @@ void led_set_enabled(bool enabled) {
 	apply();
 }
 
+void led_notify_update_ready(void) {
+	// The Wi-Fi-transfer pattern is the existing short attention blink. An
+	// ordinary apply() from playback or charging takes the LED back.
+	set_pattern(PATTERN_WIFI_TRANSFER);
+}
+
 void led_set_idle_off(bool enabled) {
 	s_idle_off_enabled = enabled;
 	apply();

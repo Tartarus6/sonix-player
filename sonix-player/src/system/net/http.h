@@ -109,6 +109,13 @@ typedef struct {
 	// never NULL, so the caller always frees the same way.
 	bool allow_empty_body;
 
+	// Refuse a redirect that would take an https:// request down to plain
+	// http://. Opt-in: callers that carry a credential in their headers (the
+	// ListenBrainz token) need it, while an ordinary station can still follow
+	// a redirect from http to https and back. Default false keeps every
+	// existing caller's behaviour exactly as it was.
+	bool no_https_downgrade;
+
 } http_req_t;
 
 // Like http_get_ex(), but with the method and body chosen by the caller.

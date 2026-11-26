@@ -24,6 +24,8 @@ static lv_obj_t *cancel_btn;
 
 static void (*pending_action)(void *user);
 static void *pending_user;
+static void (*pending_cancel)(void *user);
+static void *pending_cancel_user;
 
 static void refresh_theme(void);
 
@@ -48,9 +50,16 @@ static void run_pending_cb(void *unused) {
 
 static void cancel_cb(lv_event_t *e) {
 	(void)e;
+	void (*action)(void *) = pending_cancel;
+	void *user = pending_cancel_user;
 	pending_action = NULL;
 	pending_user = NULL;
+	pending_cancel = NULL;
+	pending_cancel_user = NULL;
 	confirm_close();
+	if (action) {
+		action(user);
+	}
 }
 
 static void ok_cb(lv_event_t *e) {
@@ -177,6 +186,8 @@ void confirm_show(const char *title, const char *message, const char *ok_text, v
 
 	pending_action = on_ok;
 	pending_user = user;
+	pending_cancel = NULL;
+	pending_cancel_user = NULL;
 
 	lv_label_set_text(title_label, title ? tr(title) : "");
 	if (message && message[0]) {
@@ -196,6 +207,17 @@ void confirm_show(const char *title, const char *message, const char *ok_text, v
 
 	lv_obj_set_hidden(veil, false);
 	lv_obj_move_foreground(veil);
+}
+
+void confirm_show_with_cancel(const char *title, const char *message, const char *ok_text, void (*on_ok)(void *user),
+							  void *user, const char *cancel_text, void (*on_cancel)(void *user), void *cancel_user) {
+	confirm_show(title, message, ok_text, on_ok, user);
+	pending_cancel = on_cancel;
+	pending_cancel_user = cancel_user;
+	if (cancel_btn) {
+		lv_label_set_text(cancel_label, tr(cancel_text && cancel_text[0] ? cancel_text : "cancel"));
+		lv_obj_set_hidden(cancel_btn, false);
+	}
 }
 
 void confirm_notice(const char *title, const char *message) {

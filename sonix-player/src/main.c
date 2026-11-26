@@ -19,10 +19,14 @@
 #include "src/gui/nowplaying/cover.h"
 #include "src/system/audio/waveform.h"
 #include "src/gui/fonts/fonts.h"
+#include "src/gui/board_profile.h"
 #include "src/gui/shell/gui.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/settings/powersettings.h"
 #include "src/gui/settings/settings.h"
+#include "src/gui/settings/appearance.h"
+#include "src/gui/settings/musicsettings.h"
+#include "src/gui/settings/systempage.h"
 #include "src/system/device/adb.h"
 #include "src/system/audio/alsa-controls.h"
 #include "src/system/playback/sleeptimer.h"
@@ -65,6 +69,9 @@
 #include "src/system/streaming/radio.h"
 #include "src/system/device/screenshot.h"
 #include "src/system/device/sysinfo.h"
+#include "src/system/addons/addons.h"
+#include "src/system/device/batteryhistory.h"
+#include "src/gui/settings/ota_auto.h"
 #include "src/system/net/tls.h"
 #include "src/system/device/system.h"
 #include "src/system/device/usb.h"
@@ -84,6 +91,94 @@ static void host_shot_poll_cb(lv_timer_t *timer) {
 	if (access("/tmp/sonix/shot", F_OK) == 0) {
 		remove("/tmp/sonix/shot");
 		screenshot_request();
+	}
+}
+
+// Opens the file browser on the simulator without a finger, for the headless
+// tests: SONIX_OPEN_BROWSER=1 switches to it once "remember track" has had its
+// moment, exactly as tapping Browse would. SONIX_BROWSER_OPEN_DIR goes on to
+// open a folder as a tap would.
+#include "src/gui/library/browser.h"
+#include "src/gui/bluetooth/btsettings.h"
+#include "src/gui/shell/switcher.h"
+static void host_open_settings_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	switch_screen(settings_screen);
+}
+
+static void host_open_system_settings_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	switch_screen(systempage_screen);
+}
+
+static void host_open_appearance_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	switch_screen(appearance_screen);
+}
+
+static void host_open_music_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	switch_screen(musicsettings_screen);
+}
+
+// Headless QA: scroll the first scrollable child of the active page, so a
+// screenshot can reach rows below the fold on the 240x320 panel.
+static void host_scroll_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	const char *value = getenv("SONIX_SCROLL_Y");
+	if (!value) {
+		return;
+	}
+	lv_obj_t *screen = lv_screen_active();
+	if (!screen) {
+		return;
+	}
+	for (uint32_t i = 0; i < lv_obj_get_child_count(screen); i++) {
+		lv_obj_t *child = lv_obj_get_child(screen, i);
+		if (child && lv_obj_has_flag(child, LV_OBJ_FLAG_SCROLLABLE)) {
+			lv_obj_scroll_to_y(child, atoi(value), LV_ANIM_OFF);
+		}
+	}
+}
+
+static void host_browser_refresh_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	browser_refresh();
+}
+// The Bluetooth page and its device menu, likewise for looking at layouts
+// without a mouse: SONIX_OPEN_BTSETTINGS=1, and SONIX_OPEN_BT_MENU=1 opens the
+// first paired device's menu a moment later.
+static void host_open_bt_menu_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	btsettings_host_open_device_menu();
+}
+static void host_open_consent_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	btsettings_host_show_consent();
+}
+
+static void host_open_btsettings_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	switch_screen(btsettings_screen);
+	if (getenv("SONIX_OPEN_BT_MENU")) {
+		lv_timer_create(host_open_bt_menu_cb, 1200, NULL);
+	}
+	if (getenv("SONIX_MOCK_CONSENT")) {
+		lv_timer_create(host_open_consent_cb, 1200, NULL);
+	}
+}
+
+static void host_open_browser_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	switch_screen(browser_screen);
+	const char *dir = getenv("SONIX_BROWSER_OPEN_DIR");
+	if (dir && dir[0]) {
+		browser_open_dir_public(dir);
+	}
+	// Re-read the page without a user action: what a late-mounted card does.
+	const char *refresh = getenv("SONIX_BROWSER_REFRESH_MS");
+	if (refresh) {
+		lv_timer_create(host_browser_refresh_cb, atoi(refresh), NULL);
 	}
 }
 #endif
@@ -1044,11 +1139,13 @@ static void tune_pointer(lv_indev_t *indev) {
 #define SCREEN_WIDTH 480
 #define SCREEN_HEIGHT 720
 
-// The smallest panel the pages can be laid out on. Comfortably under either
-// real one: this is not a size anybody should reach, it is the floor under
-// which the arithmetic in the pages stops meaning anything.
+// The smallest panel the regular (480-pixel) pages can be laid out on. The V1
+// has its own, smaller floor: applying the regular floor to it was the reason
+// the compact widget sizes never reached its framebuffer.
 #define PANEL_MIN_WIDTH 320
 #define PANEL_MIN_HEIGHT 480
+#define COMPACT_MIN_WIDTH 240
+#define COMPACT_MIN_HEIGHT 320
 
 // The panel size for gui_config_t, in this order: SONIX_PANEL ("480x800"); the
 // model named in system-info.json; the model whose panel exactly matches the
@@ -1077,11 +1174,17 @@ static void panel_size(int *width, int *height, int fb_w, int fb_h) {
 	// Whatever the answer came from, it has to be a panel this interface can be
 	// laid out on. The pages subtract a title row and a bar from the height in
 	// unsigned arithmetic, so anything shorter than that does not crowd the
-	// layout, it wraps: the fallback is the only safe answer.
-	if (*width < PANEL_MIN_WIDTH || *height < PANEL_MIN_HEIGHT) {
-		printf("panel: %dx%d is too small to lay out, using %dx%d\n", *width, *height, SCREEN_WIDTH, SCREEN_HEIGHT);
-		*width = SCREEN_WIDTH;
-		*height = SCREEN_HEIGHT;
+	// layout, it wraps: the fallback is the only safe answer. The V1's compact
+	// layouts are written for 240x320 and have their own floor.
+	const bool compact = bp_is_compact();
+	const int min_w = compact ? COMPACT_MIN_WIDTH : PANEL_MIN_WIDTH;
+	const int min_h = compact ? COMPACT_MIN_HEIGHT : PANEL_MIN_HEIGHT;
+	if (*width < min_w || *height < min_h) {
+		const int fallback_w = compact ? bp_screen_w() : SCREEN_WIDTH;
+		const int fallback_h = compact ? bp_screen_h() : SCREEN_HEIGHT;
+		printf("panel: %dx%d is too small to lay out, using %dx%d\n", *width, *height, fallback_w, fallback_h);
+		*width = fallback_w;
+		*height = fallback_h;
 	}
 }
 
@@ -1897,6 +2000,24 @@ int main(int argc, char **argv) {
 #endif
 	config_init(config_file);
 
+	// TempoTec V1 extras (fork by @mr-f0xx). Everything below is behind the
+	// compact-model flag: the two HiBy models neither write these settings
+	// nor start these workers, so their boot, charging and network behaviour
+	// is byte-for-byte what it was before this port.
+	if (bp_is_compact()) {
+#ifdef HOST_BUILD
+		addons_seed(false);
+#else
+		addons_seed(first_start);
+#endif
+		batteryhistory_init();
+		// An addon that is off is not built: no worker, queue file or HTTP
+		// client is started for it (see addons.h).
+		if (addons_enabled("listenbrainz")) {
+			listenbrainz_init();
+		}
+	}
+
 	// A start by the cable is the charging screen alone, until the power key is
 	// held: before anything else opens the display, the keys or the audio.
 	chargescreen_run_if_wanted();
@@ -1962,9 +2083,18 @@ int main(int argc, char **argv) {
 	qobuz_init();
 	tidal_init();
 	// lastfm_init();
-	listenbrainz_init();
+	// The V1 fork starts its worker above, behind the addon gate; other models
+	// keep the stock behaviour of always starting it.
+	if (!bp_is_compact()) {
+		listenbrainz_init();
+	}
 
 	lv_init();
+
+	// The V1's update notice creates LVGL timers, so it comes after lv_init().
+	if (bp_is_compact()) {
+		ota_auto_init();
+	}
 
 	// lv_init() seeds its generator with a literal (0x1234ABCD), so without
 	// this the sequence is the same on every boot -- and lv_rand() picks the
@@ -2090,8 +2220,8 @@ int main(int argc, char **argv) {
 	gui_config_t gui_cfg = {
 		.screen_width = (uint32_t)panel_w,
 		.screen_height = (uint32_t)panel_h,
-		.top_bar_height = 44,
-		.padding = 15,
+		.top_bar_height = (int8_t)bp_status_bar_h(),
+		.padding = (int8_t)bp_padding(),
 #ifdef HOST_BUILD
 		.sd_root_path = music_path,
 #else
@@ -2293,6 +2423,28 @@ int main(int argc, char **argv) {
 
 #ifdef HOST_BUILD
 	lv_timer_create(host_shot_poll_cb, 200, NULL); // see host_shot_poll_cb
+	if (getenv("SONIX_OPEN_BROWSER")) {
+		lv_timer_create(host_open_browser_cb, 1500, NULL);
+	}
+	if (getenv("SONIX_OPEN_BTSETTINGS")) {
+		lv_timer_create(host_open_btsettings_cb, 1500, NULL);
+	}
+	// Headless QA: land on Settings so a screenshot exercises the ported rows.
+	if (getenv("SONIX_OPEN_SETTINGS")) {
+		lv_timer_create(host_open_settings_cb, 1500, NULL);
+	}
+	if (getenv("SONIX_OPEN_SYSTEM_SETTINGS")) {
+		lv_timer_create(host_open_system_settings_cb, 1500, NULL);
+	}
+	const char *qa_page = getenv("SONIX_OPEN_PAGE");
+	if (qa_page && strcmp(qa_page, "appearance") == 0) {
+		lv_timer_create(host_open_appearance_cb, 1500, NULL);
+	} else if (qa_page && strcmp(qa_page, "music") == 0) {
+		lv_timer_create(host_open_music_cb, 1500, NULL);
+	}
+	if (getenv("SONIX_SCROLL_Y")) {
+		lv_timer_create(host_scroll_cb, 2200, NULL);
+	}
 #endif
 
 	// The media player bluez shows to the headphones. After gui_init, because

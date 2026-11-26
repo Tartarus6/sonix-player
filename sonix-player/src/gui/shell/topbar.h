@@ -82,4 +82,10 @@ void topbar_set_battery_percent(bool shown);
 #define TOPBAR_CLOCK_HIDDEN 3
 void topbar_set_clock_position(int pos);
 
+// V1 update notice (optional plugin from the TempoTec fork): an accent dot at
+// the end of the left group, tappable to bring the notice back. Hidden by
+// default, so models that never call this keep the bar exactly as it was.
+void topbar_set_update_available(bool shown);
+void topbar_set_update_tap_cb(void (*cb)(void));
+
 #endif // TOPBAR_H

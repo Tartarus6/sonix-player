@@ -17,6 +17,8 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 
+#include "src/gui/board_profile.h"
+#include "src/gui/settings/ota_auto.h"
 #include "src/system/device/clock.h"
 #include "src/system/core/config.h"
 #include "src/system/core/logging.h"
@@ -1249,6 +1251,11 @@ static void poll_status(void) {
 	// RTC cannot be trusted.
 	if (now_online && !was_online) {
 		clock_network_sync();
+		// V1 only: the fork's update notice checks for a release on link-up.
+		// HiBy models keep the radio's original behaviour.
+		if (bp_is_compact()) {
+			ota_auto_link_online();
+		}
 	}
 }
 

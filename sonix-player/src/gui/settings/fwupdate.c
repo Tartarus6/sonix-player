@@ -5,7 +5,9 @@
 
 #include "lvgl/lvgl.h"
 
+#include "src/gui/board_profile.h"
 #include "src/gui/fonts/fonts.h"
+#include "src/gui/settings/ota_auto.h"
 #include "src/gui/shell/gui.h"
 #include "src/gui/shell/theme.h"
 #include "src/system/core/lang.h"
@@ -581,6 +583,11 @@ static void check_finished(ota_result_t r) {
 static void download_finished(ota_result_t r) {
 	switch (r) {
 	case OTA_OK:
+		// V1 only: the release is being made, so the standing update dot and
+		// the deferred notice must not come back for it on a later boot.
+		if (bp_is_compact()) {
+			ota_auto_release_taken();
+		}
 		show_installing();
 		break;
 	case OTA_NO_CARD:
@@ -645,6 +652,9 @@ static void sd_run(void *unused) {
 		return;
 	}
 	printf("firmware: update file %s\n", path);
+	if (bp_is_compact()) {
+		ota_auto_release_taken();
+	}
 	firmware_update_start();
 }
 
@@ -672,4 +682,19 @@ void fwupdate_show(void) {
 		holding_screen = true;
 		power_hold_screen_on(true);
 	}
+}
+
+void fwupdate_start_download(void) {
+	if (!veil) {
+		build();
+	}
+	if (!holding_screen) {
+		holding_screen = true;
+		power_hold_screen_on(true);
+	}
+	download_clicked();
+	// Whether the download started or the busy notice came up, the card is
+	// what the user should see after tapping the update notice.
+	lv_obj_set_hidden(veil, false);
+	lv_obj_move_foreground(veil);
 }

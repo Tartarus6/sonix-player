@@ -29,7 +29,19 @@ typedef struct dsd_file dsd_file_t;
 
 // Opens a .dsf or .dff. NULL when it is neither, when the rate is not one of
 // the three, or when the file has more channels than can be played.
+//
+// An SACD image (a .iso, or a ?sacd=N virtual track path) opens through the
+// same handle; a plain .iso means track 1 of the two-channel area.
 dsd_file_t *dsd_open(const char *path);
+
+// Opens one track of an SACD ISO. `path` may be the image or a ?sacd=N
+// virtual path. NULL when the image cannot be read or the track is absent.
+dsd_file_t *dsd_open_sacd(const char *path);
+
+// Opens a .wv that carries a DSD bitstream. NULL when the file is PCM WavPack
+// or the DSD rate is not one of the three this stage times. The raw bytes come
+// from libwavpack, not from a container read here.
+dsd_file_t *dsd_open_wavpack(const char *path);
 void dsd_close(dsd_file_t *d);
 
 int dsd_channels(const dsd_file_t *d);

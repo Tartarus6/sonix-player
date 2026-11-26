@@ -118,6 +118,29 @@ int btstack_devices(btstack_device_t *out, int max);
 // other and not when a prompt appeared.
 bool btstack_pair(const char *address, int timeout_ms);
 
+// ---------------------------------------------------------------------------
+// pairing agent requests (deferred replies; UI must respond)
+// ---------------------------------------------------------------------------
+
+typedef enum {
+	BTSTACK_PAIR_NONE = 0,
+	BTSTACK_PAIR_PIN,	 // RequestPinCode: UI must submit PIN string
+	BTSTACK_PAIR_PASSKEY,	 // RequestPasskey: UI must submit numeric passkey
+	BTSTACK_PAIR_CONFIRM,	 // RequestConfirmation: UI must accept/reject passkey
+	BTSTACK_PAIR_DISPLAY,	 // DisplayPinCode/DisplayPasskey: informational
+	BTSTACK_PAIR_AUTHORIZE,	 // RequestAuthorization: incoming pairing, yes/no
+} btstack_pair_req_t;
+
+bool btstack_pair_request_pending(void);
+btstack_pair_req_t btstack_pair_request_type(void);
+// Fills device address/name hint and passkey text if available.
+void btstack_pair_request_info(char *device, size_t device_size, char *passkey, size_t passkey_size);
+// Submit a response from UI: for PIN/PASSKEY pass text (or NULL to cancel),
+// for CONFIRM pass non-NULL "yes" to accept or NULL/other to reject,
+// for DISPLAY call to dismiss.
+void btstack_pair_request_reply(const char *value);
+void btstack_pair_request_cancel(void);
+
 // Device1.Connect(): every profile the device offers. Returns when the ACL link
 // is up, which is NOT the same as the audio being ready -- see
 // btstack_audio_sink(). A refusal is written to `err_out` as bluez gave it, the

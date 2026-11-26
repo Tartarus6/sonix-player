@@ -111,4 +111,8 @@ void led_set_idle_off(bool enabled);
 // while the screen is off. Waking restarts the idle window.
 void led_set_standby(bool standby);
 
+// V1 update notice: a brief on-device blink when a new release was found.
+// The next ordinary LED state change restores the normal pattern.
+void led_notify_update_ready(void);
+
 #endif /* LED_H */

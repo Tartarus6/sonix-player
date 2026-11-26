@@ -9,6 +9,7 @@
 
 #include "lvgl/lvgl.h"
 
+#include "src/gui/board_profile.h"
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/clocklabel.h"
 #include "src/gui/shell/icons.h"
@@ -108,6 +109,8 @@ static lv_obj_t *bt_icon;   // bluetooth, leftmost of the right-hand group
 static lv_obj_t *wifi_icon; // wifi, between bluetooth and the charge percentage
 static lv_obj_t *container_left;  // volume group (and the clock, when "left")
 static lv_obj_t *container_right; // battery group (and the clock, when "right")
+static lv_obj_t *update_dot;	  // V1 plugin: tappable "update available" dot
+static void (*update_tap_cb)(void);
 static lv_timer_t *battery_timer;
 static lv_timer_t *jack_timer;
 
@@ -849,6 +852,13 @@ static void topbar_clear_child_presses(lv_obj_t *obj) {
 	}
 }
 
+static void update_dot_click_cb(lv_event_t *e) {
+	(void)e;
+	if (update_tap_cb) {
+		update_tap_cb();
+	}
+}
+
 void topbar_init(gui_config_t *cfg) {
 	if (top_bar != NULL) {
 		return;
@@ -1078,10 +1088,33 @@ void topbar_init(gui_config_t *cfg) {
 	// off; only what is inside it gives presses up.
 	topbar_clear_child_presses(top_bar);
 
+	// The one child allowed to keep its press: the V1 update dot. Everything
+	// else in the bar is press-free by design, because the bar's body is the
+	// sheet pull. bp_pick keeps the dot in proportion on the 240x320 panel.
+	update_dot = lv_obj_create(container_left);
+	lv_obj_set_size(update_dot, bp_pick(6, 8), bp_pick(6, 8));
+	lv_obj_set_style_bg_color(update_dot, theme()->accent, 0);
+	lv_obj_set_style_bg_opa(update_dot, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(update_dot, 0, 0);
+	lv_obj_set_style_radius(update_dot, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_shadow_width(update_dot, 0, 0);
+	lv_obj_set_style_pad_all(update_dot, 0, 0);
+	lv_obj_set_scrollable(update_dot, false);
+	lv_obj_add_event_cb(update_dot, update_dot_click_cb, LV_EVENT_CLICKED, NULL);
+	lv_obj_set_hidden(update_dot, true);
+
 	// The battery shell is recoloured by hand rather than by a style, so it needs
 	// a repaint when the palette changes.
 	theme_register_refresh(topbar_refresh_theme);
 }
+
+void topbar_set_update_available(bool shown) {
+	if (update_dot) {
+		lv_obj_set_hidden(update_dot, !shown);
+	}
+}
+
+void topbar_set_update_tap_cb(void (*cb)(void)) { update_tap_cb = cb; }
 
 bool topbar_is_hidden(void) { return top_bar && lv_obj_is_hidden(top_bar); }
 

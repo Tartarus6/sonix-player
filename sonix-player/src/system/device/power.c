@@ -38,7 +38,9 @@
 #include "src/system/listenbrainz/listenbrainz.h"
 #include "src/system/bluetooth/bluetooth.h"
 #include "src/system/bluetooth/btreceiver.h"
+#include "src/gui/board_profile.h"
 #include "src/system/core/config.h"
+#include "src/system/device/batteryhistory.h"
 #include "src/system/core/logging.h"
 #include "src/system/device/usb.h"
 #include "src/system/audio/usbdac.h"
@@ -1015,6 +1017,12 @@ static void rtc_alarm_arm(void) {
 }
 
 void power_shutdown(void) {
+	// V1 only: the charge history is checkpointed while the settings are still
+	// writable. No charging action here, and HiBy models never enter this.
+	if (bp_is_compact()) {
+		batteryhistory_flush();
+	}
+
 	// Where the music had got to, before anything else stops. The player's own
 	// poll writes this only every ten seconds while playing and on a change of
 	// state, so without this flush a power-off loses up to ten seconds -- and a

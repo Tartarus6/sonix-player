@@ -8,8 +8,11 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 ## Supported audio formats
 
-`.wav` `.flac` `.mp3` `.ogg` `.opus` `.m4a` `.m4b` `.mp4` `.aac` `.wv` `.wvc` `.ape` `.dsf` `.dff` `.aif` `.aiff` `.aifc` `.caf`
+`.wav` `.rf64` `.w64` `.flac` `.mp3` `.ogg` `.opus` `.m4a` `.m4b` `.mp4` `.aac` `.wv` `.wvc` `.ape` `.dsf` `.dff` `.iso` `.aif` `.aiff` `.aifc` `.caf`
 
+- **SACD ISO** - the stereo area of an SACD image is imported as an album, one track per SACD track, with the image's own titles, artist, year and genre. DSD and DST images both play; multichannel-only images are skipped.
+- **DSD in WavPack** - a `.wv` carrying DSD reaches the DAC as DoP through the same output stage `.dsf` and `.dff` use. The player reads the bitstream from the file, which avoids the PCM decimation that underran the card.
+- **RF64 and Wave64** - `.rf64` and `.w64` play like `.wav`, including recordings longer than 4 GB. RF64 takes its data length from the `ds64` chunk; Wave64 reads 64-bit chunk sizes from GUID headers.
 - **CUE sheets** - a whole disc ripped into one file with a `.cue` next to it shows up as separate tracks.
 - **Tags in WAV and AIFF** are read too, cover included.
 
@@ -44,7 +47,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 ## Playback
 
-- **Playback modes** - normal, repeat all, repeat one, shuffle, and a continuous shuffle that deals a new order every round.
+- **Playback modes** - normal, stop after the current track, repeat all, repeat one, shuffle, and a continuous shuffle that deals a new order every round.
 - **Play albums back to back** - when an album ends, the next one starts.
 - **Play by folder** - when a folder ends, playback goes on with the next folder.
 - **Add to queue** - as the next track or at the end.

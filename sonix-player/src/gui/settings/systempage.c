@@ -8,12 +8,17 @@
 
 #include "src/gui/shell/confirm.h"
 #include "src/gui/shell/easteregg.h"
+#include "src/gui/board_profile.h"
 #include "src/gui/fonts/fonts.h"
+#include "src/gui/settings/batteryprofilepage.h"
 #include "src/gui/settings/fwupdate.h"
+#include "src/gui/settings/ota_auto.h"
+#include "src/gui/settings/plugins.h"
 #include "src/gui/settings/settings.h"
 #include "src/gui/shell/settingsrow.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
+#include "src/system/addons/addons.h"
 #include "src/system/core/config.h"
 #include "src/system/device/factoryreset.h"
 #include "src/system/audio/headset.h"
@@ -24,6 +29,13 @@
 
 lv_obj_t *systempage_screen;
 lv_obj_t *sysinfo_screen;
+
+static lv_obj_t *v1_ota_switch;
+
+static void v1_ota_toggled_cb(lv_event_t *e) {
+	(void)e;
+	ota_auto_set_enabled(lv_obj_has_state(v1_ota_switch, LV_STATE_CHECKED));
+}
 
 // The headset controls are under Settings > More (see settings.c). System is
 // entered to update the firmware or wipe the device, twice a year, which has
@@ -302,6 +314,22 @@ void systempage_init(gui_config_t *cfg) {
 	// Actions, not pages: settingsrow_action leaves off the chevron.
 	settingsrow_action(container, "system_update_firmware", firmware_clicked_cb, NULL);
 	settingsrow_action(container, "system_factory_reset", factory_clicked_cb, NULL);
+
+	// TempoTec V1 (mr-f0xx fork) extras. The two HiBy models keep the
+	// System page exactly as it was.
+	if (bp_is_compact()) {
+		// An off addon's page is never built, so it holds no RAM and its
+		// poll timer is not created; the row is gated by the same switch.
+		if (addons_enabled("battery_profile")) {
+			lv_obj_t *profile = batteryprofilepage_init(cfg);
+			settingsrow_add(container, "battery_profile_title", NULL, switch_screen_cb, profile);
+		}
+		settingsrow_add(container, "plugins", NULL, switch_screen_cb, plugins_screen);
+		settingsrow_toggle(container, "system_update_auto_notices", &v1_ota_switch, v1_ota_toggled_cb);
+		if (ota_auto_enabled()) {
+			lv_obj_add_state(v1_ota_switch, LV_STATE_CHECKED);
+		}
+	}
 
 	switcher_attach_back_gesture(systempage_screen);
 }

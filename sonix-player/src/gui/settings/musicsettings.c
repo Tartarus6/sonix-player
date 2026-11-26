@@ -8,8 +8,10 @@
 
 #include "src/gui/shell/confirm.h"
 #include "src/gui/shell/icons.h"
+#include "src/gui/board_profile.h"
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/library/libraryscan.h"
+#include "src/system/addons/addons.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/shell/confirm.h"
 #include "src/gui/audio/eqpage.h"
@@ -1904,8 +1906,19 @@ void musicsettings_init(gui_config_t *cfg) {
 	// lastfmsettings_init(cfg);
 	// settingsrow_add(container, "lastfm", NULL, switch_screen_cb, lastfmsettings_screen());
 
-	listenbrainzsettings_init(cfg);
-	settingsrow_add(container, "listenbrainz", NULL, switch_screen_cb, listenbrainzsettings_screen());
+	// Stock models show the row unconditionally; the V1 fork inits the page
+	// and gates its row on the addon below, so keep the two paths from doing
+	// either twice.
+	if (!bp_is_compact()) {
+		listenbrainzsettings_init(cfg);
+		settingsrow_add(container, "listenbrainz", NULL, switch_screen_cb, listenbrainzsettings_screen());
+	}
+
+	// The V1 fork's second scrobbler. Its page exists only on the compact
+	// model, where listenbrainz_init() starts the worker at boot.
+	if (bp_is_compact() && addons_enabled("listenbrainz")) {
+		settingsrow_add(container, "listenbrainz", NULL, switch_screen_cb, listenbrainzsettings_screen());
+	}
 
 	settingsrow_heading(container, "musicsettings_section_playback");
 	build_playback_page(cfg);

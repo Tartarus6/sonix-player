@@ -4,14 +4,17 @@
 
 #include "lvgl/lvgl.h"
 
+#include "src/gui/board_profile.h"
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/settings/bootlogopage.h"
+#include "src/gui/settings/bootpicpage.h"
 #include "src/gui/shell/corners.h"
 #include "src/gui/shell/settingsrow.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
 #include "src/gui/shell/topbar.h"
+#include "src/system/addons/addons.h"
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
 
@@ -316,6 +319,12 @@ void appearance_init(gui_config_t *cfg) {
 	// The picture shown while the player boots, which follows the theme and
 	// the accent unless one of the user's own is chosen.
 	settingsrow_add(container, "bootlogo", NULL, switch_screen_cb, bootlogopage_screen);
+
+	// The V1 fork's own folder of boot pictures, beside the shared boot logo
+	// page. Only the compact panel has the boot script that reads its copy.
+	if (bp_is_compact() && addons_enabled("bootpic")) {
+		settingsrow_add(container, "bootpic_title", NULL, switch_screen_cb, bootpicpage_screen);
+	}
 
 	// How big the small text on every page is: the secondary lines, notes,
 	// clocks and counters. See fonts.c for which sizes grow and by how much.
