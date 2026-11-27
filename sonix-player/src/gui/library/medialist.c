@@ -15,6 +15,7 @@
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/gui.h"
 #include "src/gui/shell/icons.h"
+#include "src/gui/shell/scrolltext.h"
 #include "src/gui/settings/musicsettings.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/library/playlistpage.h"
@@ -1802,7 +1803,7 @@ static void row_bind(panel_t *p, row_t *row, int index) {
 	// only the name is for reading.
 	char shown[sizeof(((winrow_t *)0)->name)];
 	library_album_title(name, shown, sizeof(shown));
-	lv_label_set_text(row->label, shown);
+	scrolltext_set(row->label, shown);
 	// Decided here and not at construction, because the same panel serves
 	// Artists, Albums and Genres in turn: only the bind knows which list is
 	// loaded right now.
@@ -3891,10 +3892,10 @@ static void build_panel(panel_t *p, gui_config_t *cfg, bool is_tracks, int slot_
 		lv_obj_set_event_bubble(row->text, true);
 
 		row->label = lv_label_create(row->text);
-		lv_label_set_long_mode(row->label, LV_LABEL_LONG_DOT);
+		scrolltext_apply_list(row->label);
 		lv_obj_set_width(row->label, LV_PCT(100));
-		// One line, always. LV_LABEL_LONG_DOT wraps before it truncates, and a
-		// title on two lines pushes the badge under it out of the row.
+		// One line, always. A title on two lines pushes the badge under it out
+		// of the row.
 		lv_obj_set_height(row->label, lv_font_get_line_height(&font_ui_24));
 		lv_obj_add_style(row->label, &theme_style_text, 0);
 		lv_obj_set_style_text_font(row->label, &font_ui_24, 0);

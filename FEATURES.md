@@ -35,6 +35,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **Alternative album view** - the album opens with its big cover on top, with title, artist, genre and year, and the tracks underneath.
 - **Tapping an artist, a genre or a year** can open its albums instead of its tracks.
 - **Show artist** under the title in the lists you choose.
+- **Scrolling text in lists** - turn on automatic scrolling for names too long to fit, with three speeds. Short names keep their space. The speed also applies to Now Playing and the other scrolling labels.
 - **Quality badge** under the title: lossy, CD, Hi-Res or DSD.
 - **Track length** beside every track in the lists. A library scanned by an older version shows it after the next full scan.
 - **Go to current track** - the lists open on what is playing.

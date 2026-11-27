@@ -16,6 +16,7 @@
 #include "src/gui/shell/gui.h"
 #include "src/gui/shell/icons.h"
 #include "src/gui/shell/keyboard.h"
+#include "src/gui/shell/scrolltext.h"
 #include "src/gui/library/imageview.h"
 #include "src/gui/library/textview.h"
 #include "src/gui/nowplaying/coverflow.h"
@@ -770,8 +771,8 @@ static void pick_rebuild(void) {
 		lv_obj_set_style_image_recolor_opa(glyph, LV_OPA_COVER, 0);
 
 		lv_obj_t *label = lv_label_create(row);
-		lv_label_set_text(label, names[i]);
-		lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+		scrolltext_apply_list(label);
+		scrolltext_set(label, names[i]);
 		lv_obj_set_flex_grow(label, 1);
 		lv_obj_set_height(label, 32);
 		lv_obj_add_style(label, &theme_style_text, 0);
@@ -1017,11 +1018,11 @@ static void build_row(int index) {
 	lv_obj_set_style_image_recolor_opa(glyph, LV_OPA_COVER, 0);
 
 	lv_obj_t *label = lv_label_create(row);
-	lv_label_set_text(label, entry->name);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+	scrolltext_apply_list(label);
+	scrolltext_set(label, entry->name);
 	lv_obj_set_flex_grow(label, 1);
-	// One line, then dots. Without a height the label wraps instead, and a long
-	// name then grows past the fixed row it lives in.
+	// One line. Without a height the label wraps instead, and a long name then
+	// grows past the fixed row it lives in.
 	lv_obj_set_height(label, 32);
 	lv_obj_add_style(label, &theme_style_text, 0);
 	lv_obj_set_style_text_font(label, &font_ui_22, 0);

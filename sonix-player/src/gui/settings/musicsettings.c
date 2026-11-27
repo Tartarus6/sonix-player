@@ -20,6 +20,7 @@
 #include "src/gui/settings/lastfmsettings.h"
 #include "src/gui/settings/listenbrainzsettings.h"
 #include "src/gui/library/medialist.h"
+#include "src/gui/shell/scrolltext.h"
 #include "src/gui/shell/settingsrow.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
@@ -1473,6 +1474,60 @@ static void allow_delete_cb(lv_event_t *e) {
 	medialist_set_allow_delete(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
 }
 
+static lv_obj_t *scroll_switch;
+static lv_obj_t *scroll_pills;
+static lv_obj_t *scroll_pill[3];
+
+static const int scroll_speed_values[3] = {SCROLL_SPEED_SLOW, SCROLL_SPEED_NORMAL, SCROLL_SPEED_FAST};
+
+static int scroll_speed_gap(int a, int b) { return a > b ? a - b : b - a; }
+
+static void scroll_refresh(void) {
+	if (!scroll_switch) {
+		return;
+	}
+	if (scrolltext_auto_enabled()) {
+		lv_obj_add_state(scroll_switch, LV_STATE_CHECKED);
+	} else {
+		lv_obj_remove_state(scroll_switch, LV_STATE_CHECKED);
+	}
+	// The speed also drives Now Playing and the other always-on scrolling
+	// labels, so it stays editable even with list scrolling switched off.
+	lv_obj_set_hidden(scroll_pills, false);
+
+	int speed = scrolltext_speed_px_s();
+	int best = 0;
+	int best_gap = scroll_speed_gap(speed, scroll_speed_values[0]);
+	for (int i = 1; i < 3; i++) {
+		int gap = scroll_speed_gap(speed, scroll_speed_values[i]);
+		if (gap < best_gap) {
+			best_gap = gap;
+			best = i;
+		}
+	}
+	for (int i = 0; i < 3; i++) {
+		settingsrow_pill_active(scroll_pill[i], i == best);
+	}
+}
+
+static void scroll_toggle_cb(lv_event_t *e) {
+	(void)e;
+	config_set_bool("ui", "scroll_names", lv_obj_has_state(scroll_switch, LV_STATE_CHECKED));
+	config_save();
+	scrolltext_settings_changed();
+	scroll_refresh();
+}
+
+static void scroll_pick_cb(lv_event_t *e) {
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
+	config_set_int("ui", "scroll_speed", (int)(intptr_t)lv_event_get_user_data(e));
+	config_save();
+	scrolltext_settings_changed();
+	scroll_refresh();
+}
+
 static void build_library_page(gui_config_t *cfg) {
 	library_screen = lv_obj_create(NULL);
 	lv_obj_t *container = settingsrow_page(library_screen, cfg, "musicsettings_library");
@@ -1519,6 +1574,16 @@ static void build_library_page(gui_config_t *cfg) {
 	option_note(container, "musicsettings_show_artist_note");
 	artist_refresh();
 	theme_register_refresh(artist_refresh);
+
+	// Long names in lists scroll instead of ending in dots. The speed is also
+	// used by the player and the other labels that scroll.
+	settingsrow_toggle_pills(container, "musicsettings_scroll_names", scroll_toggle_cb, &scroll_switch, &scroll_pills);
+	scroll_pill[0] = settingsrow_pill(scroll_pills, "musicsettings_scroll_slow", scroll_speed_values[0], scroll_pick_cb);
+	scroll_pill[1] = settingsrow_pill(scroll_pills, "musicsettings_scroll_normal", scroll_speed_values[1], scroll_pick_cb);
+	scroll_pill[2] = settingsrow_pill(scroll_pills, "musicsettings_scroll_fast", scroll_speed_values[2], scroll_pick_cb);
+	option_note(container, "musicsettings_scroll_names_note");
+	scroll_refresh();
+	theme_register_refresh(scroll_refresh);
 
 	// A small mark under a track's title saying what the file is. It comes from
 	// what the scan wrote down, so a library indexed by an older build wears no

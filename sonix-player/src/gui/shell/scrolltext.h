@@ -3,6 +3,8 @@
 
 #include "lvgl/lvgl.h"
 
+#include <stdbool.h>
+
 // A label that scrolls its text sideways when it does not fit -- but only
 // after standing still long enough to be read first, and pausing again at the
 // end of every pass.
@@ -41,5 +43,26 @@ void scrolltext_apply(lv_obj_t *label);
 // push the start of the scroll back for ever and the text would never move.
 // Setting it only on a real change also saves the layout pass.
 void scrolltext_set(lv_obj_t *label, const char *text);
+
+// Whether list rows scroll long names. Now Playing and the other always-on
+// labels ignore this setting.
+bool scrolltext_auto_enabled(void);
+
+// The three speeds offered by the settings UI, in pixels per second. Kept
+// here so the pills and the runtime value cannot drift apart.
+#define SCROLL_SPEED_SLOW 35
+#define SCROLL_SPEED_NORMAL 55
+#define SCROLL_SPEED_FAST 80
+
+// The current speed in pixels per second, clamped to 20..120.
+int scrolltext_speed_px_s(void);
+
+// Applies the marquee to a list row's label. The row obeys the switch, unlike
+// the always-on surfaces; its enabled state survives park and unpark cycles.
+void scrolltext_apply_list(lv_obj_t *label);
+
+// Called after either setting changes. Re-modes list rows and re-measures
+// durations for every scrolling label.
+void scrolltext_settings_changed(void);
 
 #endif /* SCROLLTEXT_H */

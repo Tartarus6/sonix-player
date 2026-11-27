@@ -20,6 +20,7 @@
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/gui.h"
 #include "src/gui/shell/icons.h"
+#include "src/gui/shell/scrolltext.h"
 #include "src/gui/settings/musicsettings.h"
 #include "src/gui/library/playlistpage.h"
 #include "src/gui/nowplaying/player.h"
@@ -396,7 +397,7 @@ static void row_bind(row_t *row, int index) {
 
 	lv_obj_set_hidden(row->button, false);
 	lv_obj_set_y(row->button, index * ROW_PITCH);
-	lv_label_set_text(row->label, entry_name((size_t)index));
+	scrolltext_set(row->label, entry_name((size_t)index));
 	row_show_glyph(row, shown.entries[index].is_dir != 0);
 	row_update_playmark(row);
 	row_update_selection(row);
@@ -1538,13 +1539,12 @@ static void build_rows(int width) {
 		lv_image_set_inner_align(row->icon, LV_IMAGE_ALIGN_CENTER);
 
 		row->label = lv_label_create(row->button);
-		lv_label_set_long_mode(row->label, LV_LABEL_LONG_DOT);
+		scrolltext_apply_list(row->label);
 		lv_obj_set_flex_grow(row->label, 1);
 		lv_obj_add_style(row->label, &theme_style_text, 0);
 		lv_obj_set_style_text_font(row->label, &font_ui_24, 0);
-		// Two lines at most: the cap on the height is what makes LV_LABEL_LONG_DOT
-		// cut the name there, with the ellipsis, instead of wrapping on past the
-		// row. A cap and not a height, so a one-line name stays centred.
+		// One line, as every scrolling label. A cap and not a height, so a
+		// one-line name stays centred.
 		lv_obj_set_style_max_height(row->label,
 									2 * lv_font_get_line_height(&font_ui_24) +
 										lv_obj_get_style_text_line_space(row->label, LV_PART_MAIN),

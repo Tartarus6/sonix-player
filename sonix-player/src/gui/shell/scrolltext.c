@@ -2,9 +2,11 @@
 
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/animpark.h"
+#include "src/system/core/config.h"
 
 #include "lvgl/src/misc/lv_text_ap.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -22,7 +24,9 @@
 // length of a track title: under a fixed duration it goes past several times
 // as fast and cannot be read at all. 55 px/s is a comfortable reading pace at
 // any length.
-#define SCROLL_SPEED_PX_S 55
+#define SCROLL_SPEED_DEFAULT SCROLL_SPEED_NORMAL
+#define SCROLL_SPEED_MIN 20
+#define SCROLL_SPEED_MAX 120
 
 // Floor and ceiling on one pass. The floor stops a barely-overflowing title
 // from twitching; the ceiling exists only to bound the pathological case, not
@@ -38,6 +42,19 @@
 // header -- hence the copy). Matching it makes the measured distance exactly
 // the animated one.
 #define SCROLL_WAIT_CHARS 3
+
+bool scrolltext_auto_enabled(void) { return config_get_bool("ui", "scroll_names", false); }
+
+int scrolltext_speed_px_s(void) {
+	int speed = (int)config_get_int("ui", "scroll_speed", SCROLL_SPEED_DEFAULT);
+	if (speed < SCROLL_SPEED_MIN) {
+		return SCROLL_SPEED_MIN;
+	}
+	if (speed > SCROLL_SPEED_MAX) {
+		return SCROLL_SPEED_MAX;
+	}
+	return speed;
+}
 
 // The template every scrolling label points at. It has to outlive them all --
 // the style keeps the pointer, not a copy -- so it is a single static one,
@@ -106,7 +123,6 @@ static int32_t text_width(lv_obj_t *label, const char *text) {
 
 #define FADE_EDGE_PX 24
 #define FADE_CACHE_MAX 8
-#define FADE_LABELS_MAX 16
 #define FADE_POLL_MS 80
 
 // One size, and the two masks for it: `both` while the text moves, `tail` while
@@ -198,11 +214,46 @@ typedef struct {
 	// the animation's own clock; `resume` while it is still to be put back.
 	int32_t resume_time;
 	bool resume;
+	// The text last given to scrolltext_set(), owned by this entry. LVGL's
+	// label buffer is rewritten with dots while a list row is in DOT mode, so
+	// it is not a reliable source for measuring the pass or the fade.
+	char *source;
 } fade_label_t;
 
-static fade_label_t fade_labels[FADE_LABELS_MAX];
+// One entry per scrolling label, not per fade mask: the registry has to cover
+// every list row so settings changes reach them even when the mask cache is
+// full. It grows with the rows and entries are removed on LV_EVENT_DELETE.
+static fade_label_t *fade_labels;
 static int fade_label_count;
+static int fade_label_cap;
 static lv_timer_t *fade_timer;
+
+// List rows obey the scroll_names switch. Their state lives on the label
+// itself so it survives park and unpark cycles; LVGL's long mode cannot carry
+// it either, because animpark writes CLIP while a label is parked.
+#define LIST_MARK_OFF ((void *)(uintptr_t)1)
+#define LIST_MARK_ON ((void *)(uintptr_t)2)
+
+static void fade_update(lv_obj_t *label);
+
+static bool is_list_label(lv_obj_t *label) {
+	void *mark = lv_obj_get_user_data(label);
+	return mark == LIST_MARK_OFF || mark == LIST_MARK_ON;
+}
+
+static bool list_enabled(lv_obj_t *label) { return lv_obj_get_user_data(label) != LIST_MARK_OFF; }
+
+// The last full text for a label, or its current buffer when none was set
+// through scrolltext_set() (an empty label, normally).
+static const char *label_source(const fade_label_t *entry) { return entry->source ? entry->source : lv_label_get_text(entry->label); }
+
+static void apply_mode(lv_obj_t *label) {
+	if (animpark_is_parked(label)) {
+		return;
+	}
+	lv_label_set_long_mode(label, list_enabled(label) ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT);
+	fade_update(label);
+}
 
 static fade_label_t *fade_entry(lv_obj_t *label) {
 	for (int i = 0; i < fade_label_count; i++) {
@@ -210,13 +261,19 @@ static fade_label_t *fade_entry(lv_obj_t *label) {
 			return &fade_labels[i];
 		}
 	}
-	if (fade_label_count >= FADE_LABELS_MAX) {
-		return NULL;
+	if (fade_label_count == fade_label_cap) {
+		int cap = fade_label_cap ? fade_label_cap * 2 : 16;
+		fade_label_t *grown = realloc(fade_labels, (size_t)cap * sizeof(*grown));
+		if (!grown) {
+			return NULL;
+		}
+		fade_labels = grown;
+		fade_label_cap = cap;
 	}
-	fade_labels[fade_label_count].label = label;
-	fade_labels[fade_label_count].masks = NULL;
-	fade_labels[fade_label_count].resume = false;
-	return &fade_labels[fade_label_count++];
+	fade_label_t *entry = &fade_labels[fade_label_count++];
+	memset(entry, 0, sizeof(*entry));
+	entry->label = label;
+	return entry;
 }
 
 // True while the label's text is actually travelling. lv_anim expresses a delay
@@ -267,12 +324,17 @@ static void fade_update(lv_obj_t *label) {
 	if (!entry) {
 		return;
 	}
+	if (!list_enabled(label)) {
+		entry->masks = NULL;
+		fade_pick(entry);
+		return;
+	}
 
 	int32_t w = lv_obj_get_width(label);
 	int32_t h = lv_obj_get_height(label);
 	entry->masks = NULL;
 
-	if (w > 0 && text_width(label, lv_label_get_text(label)) > lv_obj_get_content_width(label)) {
+	if (w > 0 && text_width(label, label_source(entry)) > lv_obj_get_content_width(label)) {
 		entry->masks = fade_masks(w, h);
 	}
 
@@ -306,6 +368,7 @@ static void fade_delete_cb(lv_event_t *e) {
 		if (fade_labels[i].label != label) {
 			continue;
 		}
+		free(fade_labels[i].source);
 		fade_labels[i] = fade_labels[fade_label_count - 1];
 		fade_label_count--;
 		return;
@@ -334,7 +397,7 @@ static void apply_duration(lv_obj_t *label, const char *text) {
 		return;
 	}
 
-	uint32_t ms = (uint32_t)(((int64_t)distance * 1000) / SCROLL_SPEED_PX_S);
+	uint32_t ms = (uint32_t)(((int64_t)distance * 1000) / scrolltext_speed_px_s());
 	if (ms < SCROLL_MIN_MS) {
 		ms = SCROLL_MIN_MS;
 	} else if (ms > SCROLL_MAX_MS) {
@@ -348,7 +411,7 @@ static void apply_duration(lv_obj_t *label, const char *text) {
 // the new width of its text, and its fade follows whether it still overflows.
 static void fonts_changed(void) {
 	for (int i = 0; i < fade_label_count; i++) {
-		apply_duration(fade_labels[i].label, lv_label_get_text(fade_labels[i].label));
+		apply_duration(fade_labels[i].label, label_source(&fade_labels[i]));
 		fade_update(fade_labels[i].label);
 	}
 }
@@ -398,7 +461,7 @@ static void resume_cb(lv_event_t *e) {
 }
 
 static void scroll_unpark(lv_obj_t *label) {
-	lv_label_set_long_mode(label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+	lv_label_set_long_mode(label, list_enabled(label) ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT);
 	fade_label_t *entry = fade_entry(label);
 	if (entry && entry->resume) {
 		// Added after the label's own handler, which set_long_mode has just
@@ -419,14 +482,31 @@ void scrolltext_apply(lv_obj_t *label) {
 		registered = true;
 	}
 
+	fade_label_t *entry = fade_entry(label);
+	if (entry && !entry->source) {
+		const char *text = lv_label_get_text(label);
+		if (text) {
+			entry->source = strdup(text);
+		}
+	}
+
 	lv_label_set_long_mode(label, LV_LABEL_LONG_SCROLL_CIRCULAR);
 	lv_obj_set_style_anim(label, &scroll_template, LV_PART_MAIN);
-	apply_duration(label, lv_label_get_text(label));
+	apply_duration(label, entry ? label_source(entry) : lv_label_get_text(label));
 
 	lv_obj_add_event_cb(label, fade_size_cb, LV_EVENT_SIZE_CHANGED, NULL);
 	lv_obj_add_event_cb(label, fade_delete_cb, LV_EVENT_DELETE, NULL);
 	fade_update(label);
 	animpark_watch(label, scroll_park, scroll_unpark);
+}
+
+void scrolltext_apply_list(lv_obj_t *label) {
+	if (!label) {
+		return;
+	}
+	scrolltext_apply(label);
+	lv_obj_set_user_data(label, scrolltext_auto_enabled() ? LIST_MARK_ON : LIST_MARK_OFF);
+	apply_mode(label);
 }
 
 // `text` on one line: line breaks, tabs and other control characters become
@@ -522,6 +602,11 @@ void scrolltext_set(lv_obj_t *label, const char *text) {
 	fade_label_t *entry = fade_entry(label);
 	if (entry) {
 		entry->resume = false;
+		char *copy = strdup(line);
+		if (copy) {
+			free(entry->source);
+			entry->source = copy;
+		}
 	}
 
 	// The duration first: changing it rebuilds the scroll animation, so doing
@@ -532,5 +617,18 @@ void scrolltext_set(lv_obj_t *label, const char *text) {
 	fade_update(label);
 	if (line != text) {
 		free(line);
+	}
+}
+
+void scrolltext_settings_changed(void) {
+	bool on = scrolltext_auto_enabled();
+	void *mark = on ? LIST_MARK_ON : LIST_MARK_OFF;
+	for (int i = 0; i < fade_label_count; i++) {
+		lv_obj_t *label = fade_labels[i].label;
+		if (is_list_label(label)) {
+			lv_obj_set_user_data(label, mark);
+			apply_mode(label);
+		}
+		apply_duration(label, label_source(&fade_labels[i]));
 	}
 }

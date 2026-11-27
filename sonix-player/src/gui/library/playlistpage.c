@@ -11,6 +11,7 @@
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/icons.h"
 #include "src/gui/shell/keyboard.h"
+#include "src/gui/shell/scrolltext.h"
 #include "src/gui/library/medialist.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/shell/popover.h"
@@ -483,10 +484,10 @@ static lv_obj_t *add_row(const char *name, const char *subtitle, const lv_image_
 	lv_obj_set_flex_align(texts, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
 	lv_obj_t *name_label = lv_label_create(texts);
-	lv_label_set_text(name_label, name);
-	lv_label_set_long_mode(name_label, LV_LABEL_LONG_DOT);
+	scrolltext_apply_list(name_label);
+	scrolltext_set(name_label, name);
 	lv_obj_set_width(name_label, lv_pct(100));
-	// One line, cut with dots past it.
+	// One line.
 	lv_obj_set_height(name_label, lv_font_get_line_height(&font_ui_24));
 	lv_obj_add_style(name_label, &theme_style_text, 0);
 	lv_obj_set_style_text_font(name_label, &font_ui_24, 0);
