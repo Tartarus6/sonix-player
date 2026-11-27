@@ -268,11 +268,15 @@ The packer looks only next to itself:
 ```
 sonix-packer/
 ├── sonix_firmware_packer.sh
+├── verify_upt.sh            checks a finished image before it is published
+├── image.lock              partition sizes and the bad-block reserve, per model
+├── base.lock               the stock firmware hashes that may be used
+├── kernel.lock             the kernel hashes that may be installed
 ├── r3proii_original.upt     the stock firmware of the R3 Pro II, from HiBy
 ├── r1_original.upt          the stock firmware of the R1, from HiBy
 ├── sonix_player             the binary from `make target`
 ├── sonix_launch             also from `make target`; optional
-├── kernel/                  xImage-R3PII and xImage-R1; optional
+├── kernel/                  xImage-R3PII and xImage-R1
 └── assets/
     ├── R3PII/               the overlay for the R3 Pro II
     └── R1/                  the overlay for the R1
@@ -405,10 +409,11 @@ It runs through without asking anything, once for each model:
 With `kernel/xImage-R3PII` or `kernel/xImage-R1` present, that kernel replaces
 the stock one: it may not be bigger than the stock kernel, and its size and md5
 go into `ota_update.in`. Without it the stock kernel is carried across
-untouched, size and md5 copied from the original rather than recomputed. The
-kernels in `kernel/` are built from
-[hiby-custom-kernel](https://github.com/Tartarus6/hiby-custom-kernel), and the
-modules in `assets/<model>/module_driver/` are built against them.
+untouched, size and md5 copied from the original rather than recomputed — but
+only if its version matches the modules in the image; the packer refuses a
+mismatch (see "The image is checked" below). The kernels in `kernel/` are built
+from [hiby-custom-kernel](https://github.com/Tartarus6/hiby-custom-kernel), and
+the modules in `assets/<model>/module_driver/` are built against them.
 
 Most of those modules are open-source replacements for HiBy's closed ones,
 from the same kit: same file names and parameters, so the stock `.sh` that
@@ -427,6 +432,55 @@ carried across from the stock firmware.
 | board | `gpio_aw95016_add.ko`, `sau.ko`, `sa_sound_hbc3000.ko` (the HBC3000 FPGA; its configuration comes from the stock firmware, see step 5 above) | |
 | on both | `cw2015.ko` (fuel gauge), `soc_efuse.ko`, `soc_adc.ko`, `rmem_manager.ko`, `i2c_gpio_add.ko` (the DAC's I2C bus), `keyboard_gpio_add.ko` (power and track keys), `sa_sound_switch.ko`, `sa_earpods_adc.ko`, `pwm_backlight.ko`, `soc_utils.ko`, `sa_config_module.ko`, `utils.ko` (the helpers the other modules link against), `soc_gpio.ko` (`/dev/gpio`), `sa_hgl_dma.ko` (`/dev/sa_hgl_dma`), `soc_aic.ko` (the I2S controller), `soc_pwm.ko` (the PWM controller), `soc_i2c.ko` (the I2C controllers), `soc_fb.ko` (the LCD controller, `/dev/fb0`), `soc_msc.ko` (the MMC/SD controllers: the microSD slot and the Wi-Fi chip's SDIO), `axp2101.ko` (the PMIC: regulators and power off) | the same |
 | Wi-Fi | `brcmfmac.ko`, `brcmutil.ko` and `bcm_wlbt_power.ko` in place of `cywdhd.ko` | the same |
+
+### The image is checked
+
+The packer refuses to finish an image it cannot vouch for. Three things are
+checked before the file is written, and the finished `.upt` is checked again
+afterwards:
+
+- **The rootfs fits with room for bad blocks.** `image.lock` gives each model's
+  rootfs partition, erase block and kernel partition. A build must leave at
+  least 8 erase blocks (1 MiB) free in the rootfs and 4 in the kernel; fewer
+  than 16 in the rootfs prints a warning. This is not a formality: the OTA
+  updater erases the whole partition before `nandwrite` writes it, and the
+  size `mtdinfo` reports does not subtract NAND bad blocks. A rootfs that only
+  just fits leaves the device with no rootfs when a block is bad, and the
+  recovery is the only way back. The 1.3.0 image left 19 erase blocks free;
+  the issue-147 test image left one and bricked a tester's R1.
+- **The base and the kernel are known.** `base.lock` lists the stock firmware
+  hashes that may be used and the kernel each one carries. `kernel.lock` lists
+  the kernels that may be installed. A file that is not in the lock is refused:
+  replace the stock firmware or the kernel only in the same commit that updates
+  the lock, so the change is visible.
+- **Every module matches the kernel.** The kernel version is read from the
+  image and every `.ko` in the rootfs must carry it in its `vermagic`. A
+  mismatch does not load; the device can boot without its Wi-Fi, panel, touch
+  or PMIC. This is what catches a v2.0 stock base paired with a v1.6 kernel,
+  and a rootfs that mixes modules from two kernel builds.
+- **The finished image is verified end to end.** `verify_upt.sh` re-reads the
+  ISO: `ota_v0.ok`, `ota_update.in`, the chunk sizes and md5 chains, the joined
+  rootfs and kernel, the partition budgets and the module/kernel match. It can
+  be run by hand on any image:
+
+  ```bash
+  ./verify_upt.sh --model R1 --upt r1.upt --device "HiBy R1"
+  ./verify_upt.sh --model R3PII --upt r3proii.upt --device "HiBy R3 Pro II"
+  ```
+
+  Add `--player sonix_player` to check that the player in the image is the
+  binary that was packed.
+
+  The verifier's own test builds two tiny images from scratch, one that passes
+  and one that must fail, and needs no stock firmware or device:
+
+  ```bash
+  ./tests/test_verify_upt.sh
+  ```
+
+An image that fails any of these is not published. A pass only means the image
+is worth flashing: the hardware checklist in the player's `tests/` directory is
+still the last step.
 
 ### System libraries
 

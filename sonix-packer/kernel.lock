@@ -1,0 +1,14 @@
+# Kernels the packer may install, one line per file.
+#
+# md5|filename
+#
+# kernel/xImage-R1 and kernel/xImage-R3PII are tracked, so this lock is mostly
+# a statement of which build they are: the 1.3.0 kernel, built from
+# hiby-custom-kernel. It catches a local kernel that was replaced without
+# rebuilding the modules beside it, which is the same mistake as a mismatched
+# stock kernel, one directory later.
+#
+# To update one, rebuild the modules in assets/<model>/module_driver against
+# it, run the packer, and change the hash here in the same commit.
+b48580b0fb42504b2871414a54d0c068|xImage-R1
+44315fc82b20e617664b48c5cba6ca74|xImage-R3PII

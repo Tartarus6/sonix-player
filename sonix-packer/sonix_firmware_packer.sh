@@ -88,9 +88,17 @@ LAUNCH_BIN="$SCRIPT_DIR/sonix_launch"
 # Not under assets/, which is copied into the rootfs.
 KERNEL_DIR="$SCRIPT_DIR/kernel"
 
-# The size of the partitions the two images are written to
-KERNEL_MAX=$((0x500000))
-ROOTFS_MAX=$((0x2d00000))
+# The image is checked against the flash layout, not against the size of the
+# last release: a rootfs that only just fits its partition is erased by the OTA
+# updater before it is written, and the device has no rootfs left when a NAND
+# block is bad. See image.lock for the numbers and base.lock/kernel.lock for
+# the build inputs they were measured with.
+IMAGE_LOCK="$SCRIPT_DIR/image.lock"
+BASE_LOCK="$SCRIPT_DIR/base.lock"
+KERNEL_LOCK="$SCRIPT_DIR/kernel.lock"
+ROOTFS_RESERVE_PEB=8
+ROOTFS_WARN_PEB=16
+KERNEL_RESERVE_PEB=4
 
 # The models, one line each: the assets folder, the stock firmware to start
 # from, the image to write, and the device-name the player will read out of
@@ -233,6 +241,9 @@ STOCK_DEBUG_TOOLS=(
 cleanup() { rm -rf "$WORK_DIR" "$SQUASH_DIR" "$MERGED_SQUASHFS" 2>/dev/null || true; }
 trap cleanup EXIT
 
+# A rejected image must not sit at the output path looking like a release.
+discard_failed_image() { rm -f "$1" 2>/dev/null || true; }
+
 say "${BLUE}###############################################${NC}"
 say "${BLUE}###   SONIX PLAYER -- FIRMWARE PACKER       ###${NC}"
 say "${BLUE}###############################################${NC}"
@@ -264,6 +275,39 @@ sed_file() {
 	local expression="$1" file="$2"
 	sed -E "$expression" "$file" > "$file.packer.tmp"
 	mv "$file.packer.tmp" "$file"
+}
+
+# The model's flash layout, from image.lock: 2=rootfs partition, 3=erase
+# block, 4=kernel partition. The verifier reads the same file.
+image_lock_field() {
+	local model="$1" field="$2"
+	awk -F'|' -v model="$model" -v field="$field" '
+		$1 == model && NF >= field { print $field; exit }
+	' "$IMAGE_LOCK"
+}
+
+# The kernel's own version string, as the uImage names it. The modules in the
+# rootfs carry the same string in their vermagic; a mismatch means they cannot
+# load, and the device boots without its panel, touch or PMIC.
+kernel_version() {
+	strings "$1" | grep -m1 '^Linux-' | sed 's/^Linux-//' || true
+}
+
+module_vermagic() {
+	strings "$1" | grep -m1 'vermagic=' | sed -E 's/.*vermagic=([^ ]+).*/\1/' || true
+}
+
+# A base is accepted only if its md5 is in base.lock: the stock firmware is not
+# in the repository, and an unknown one can change the kernel or the partition
+# contents. The line carries the kernel version and a human name for the log.
+base_lock_line() {
+	local sum="$1"
+	awk -F'|' -v sum="$sum" '$1 == sum { print; exit }' "$BASE_LOCK"
+}
+
+kernel_lock_line() {
+	local sum="$1" name="$2"
+	awk -F'|' -v sum="$sum" -v name="$name" '$1 == sum && $2 == name { print; exit }' "$KERNEL_LOCK"
 }
 
 # How many times a string appears in a file -- every occurrence, not the lines
@@ -355,7 +399,7 @@ step "Checking what is needed"
 # A string and not an array: bash 3.2, which is the one macOS ships, treats
 # ${#array[@]} on an empty array as an unbound variable under `set -u`.
 MISSING=""
-for tool in 7z unsquashfs mksquashfs split tar; do
+for tool in 7z unsquashfs mksquashfs split tar strings file; do
 	command -v "$tool" >/dev/null 2>&1 || MISSING="$MISSING $tool"
 done
 # The ISO writer answers to more than one name depending on the system.
@@ -376,6 +420,12 @@ fi
 
 [ -f "$PLAYER_BIN" ] || die "sonix_player is not next to this script."
 
+for lock in "$IMAGE_LOCK" "$BASE_LOCK" "$KERNEL_LOCK"; do
+	[ -f "$lock" ] || die "$(basename "$lock") is missing next to the packer.
+  It pins the flash layout and the build inputs; without it an image cannot be
+  checked against anything."
+done
+
 ASSETS_DIR="$SCRIPT_DIR/assets"
 [ -d "$ASSETS_DIR" ] || die "there is no assets folder next to this script."
 
@@ -392,9 +442,17 @@ for entry in "${MODELS[@]}"; do
 		warn "$m_src is not next to this script: $m_name will be skipped."
 		continue
 	fi
+	BASE_SUM="$(get_md5 "$SCRIPT_DIR/$m_src")"
+	BASE_LINE="$(base_lock_line "$BASE_SUM")"
+	[ -n "$BASE_LINE" ] || die "the stock firmware $m_src has md5 $BASE_SUM, which is not in base.lock.
+  A base is accepted only after its kernel and modules are known to match.
+  Add: $BASE_SUM|$m_src|<kernel version>|<name>"
+	BASE_KERNEL="$(printf '%s\n' "$BASE_LINE" | cut -d'|' -f3)"
+	BASE_NOTE="$(printf '%s\n' "$BASE_LINE" | cut -d'|' -f4)"
+	[ -n "$BASE_NOTE" ] || BASE_NOTE="$m_name"
 	BUILDABLE="$BUILDABLE$entry
 "
-	say "    $m_name: $m_src -> $m_out"
+	say "    $m_name: $m_src ($BASE_NOTE, stock kernel $BASE_KERNEL) -> $m_out"
 done
 
 [ -n "$BUILDABLE" ] || die "no stock firmware to start from. Put at least one of
@@ -579,6 +637,35 @@ build_one() {
 
 	[ -f "$SQUASH_DIR/$STOCK_LAUNCHER" ] || die "the rootfs has no $STOCK_LAUNCHER: unexpected firmware."
 	[ -f "$SQUASH_DIR/$INIT_SCRIPT" ]    || die "the rootfs has no $INIT_SCRIPT: unexpected firmware."
+
+	# The kernel this image will boot. A kernel of our own wins; without one
+	# the stock kernel stays, and it must match the modules the overlay brings.
+	# The stock kernel's chunks are still in $OTA_DIR: the rootfs chunks were
+	# removed, the kernel's were not.
+	KERNEL_NEW="$KERNEL_DIR/xImage-$MODEL_DIR"
+	STOCK_KERNEL="$WORK_DIR/xImage.stock"
+	: > "$STOCK_KERNEL"
+	for f in "$OTA_DIR"/xImage.[0-9][0-9][0-9][0-9].*; do
+		[ -e "$f" ] || continue
+		cat "$f" >> "$STOCK_KERNEL"
+	done
+	if [ -f "$KERNEL_NEW" ]; then
+		KERNEL_IMG="$KERNEL_NEW"
+		K_SUM="$(get_md5 "$KERNEL_NEW")"
+		K_LINE="$(kernel_lock_line "$K_SUM" "$(basename "$KERNEL_NEW")")"
+		[ -n "$K_LINE" ] || die "kernel/$(basename "$KERNEL_NEW") has md5 $K_SUM, which is not in kernel.lock.
+  The modules in the rootfs are built for one kernel; add the hash only with
+  the modules that match it."
+		say "    kernel: custom $(basename "$KERNEL_NEW") ($K_SUM)"
+	elif [ -s "$STOCK_KERNEL" ]; then
+		KERNEL_IMG="$STOCK_KERNEL"
+		say "    kernel: the stock kernel from $(basename "$SOURCE_UPT")"
+	else
+		die "no kernel image: the base has no xImage chunks and kernel/$MODEL_DIR is missing."
+	fi
+	KERNEL_VER="$(kernel_version "$KERNEL_IMG")"
+	[ -n "$KERNEL_VER" ] || die "cannot read the kernel version from $KERNEL_IMG."
+	say "    kernel version: $KERNEL_VER"
 	say ""
 
 	# ==========================================================================
@@ -923,6 +1010,44 @@ build_one() {
 	say ""
 
 	# ==========================================================================
+	# 7b. The kernel and its modules
+	# ==========================================================================
+	#
+	# A module carries the kernel version it was built against. The kernel
+	# refuses every other module, and a missing panel, touch or PMIC module
+	# leaves a device that looks bricked but still has a working recovery. This
+	# is the check that would have caught the issue-147 test image: its rootfs
+	# came from the v2.0 base, whose modules are built for Linux-4.4.94+, while
+	# the stock kernel in the image was 4.4.94+ and the overlay's own modules
+	# were 4.4.94-sonix.
+	step "[$MODEL_NAME] checking the kernel and its modules"
+
+	find "$SQUASH_DIR" -type f -name '*.ko' | sort > "$WORK_DIR/modules"
+	MODULE_COUNT=0
+	MODULE_BAD=""
+	while IFS= read -r ko; do
+		[ -n "$ko" ] || continue
+		MODULE_COUNT=$((MODULE_COUNT + 1))
+		vermagic="$(module_vermagic "$ko")"
+		if [ -z "$vermagic" ]; then
+			MODULE_BAD="$MODULE_BAD
+    ${ko#"$SQUASH_DIR"/}: no vermagic"
+		elif [ "$vermagic" != "$KERNEL_VER" ]; then
+			MODULE_BAD="$MODULE_BAD
+    ${ko#"$SQUASH_DIR"/}: $vermagic"
+		fi
+	done < "$WORK_DIR/modules"
+	[ "$MODULE_COUNT" -gt 0 ] || warn "no .ko modules in the rootfs; the kernel/module check is empty."
+	[ -z "$MODULE_BAD" ] || die "the rootfs has modules built for a different kernel:
+  kernel: $KERNEL_VER
+  modules:$MODULE_BAD
+  A module that does not load takes its hardware with it: Wi-Fi, panel, touch
+  or PMIC. Rebuild the rootfs against this kernel, or remove the modules that
+  do not belong to it. Do not ship a mix of two kernel builds."
+	say "    $MODULE_COUNT modules, all $KERNEL_VER"
+	say ""
+
+	# ==========================================================================
 	# 8. Repack
 	# ==========================================================================
 	say "${YELLOW}###############################${NC}"
@@ -945,9 +1070,31 @@ build_one() {
 
 	ORIGINAL_SUM="$(get_md5 "$ROOTFS_NEW")"
 	SIZE="$(get_size "$ROOTFS_NEW")"
-	say "    rootfs.squashfs: $SIZE bytes, md5 $ORIGINAL_SUM (max $ROOTFS_MAX)"
-	[ "$SIZE" -le "$ROOTFS_MAX" ] ||
-		die "rootfs.squashfs is $SIZE bytes, $((SIZE - ROOTFS_MAX)) more than the $ROOTFS_MAX-byte rootfs partition."
+	say "    rootfs.squashfs: $SIZE bytes, md5 $ORIGINAL_SUM"
+
+	# The flash layout from image.lock. mtdinfo reports the nominal partition
+	# size and the OTA updater erases the whole partition before nandwrite, so
+	# the only safe budget is the partition minus enough erase blocks for the
+	# NAND's bad blocks. The 1.3.0 release leaves 19; the issue-147 image left
+	# one, and the tester's device has two bad PEBs in userdata.
+	ROOTFS_PART="$(image_lock_field "$MODEL_DIR" 2)"
+	ERASE_BLOCK="$(image_lock_field "$MODEL_DIR" 3)"
+	KERNEL_PART="$(image_lock_field "$MODEL_DIR" 4)"
+	[ -n "$ROOTFS_PART" ] && [ -n "$ERASE_BLOCK" ] && [ -n "$KERNEL_PART" ] ||
+		die "$MODEL_DIR is not in image.lock."
+	ROOTFS_BLOCKS=$((ROOTFS_PART / ERASE_BLOCK))
+	ROOTFS_USED=$(((SIZE + ERASE_BLOCK - 1) / ERASE_BLOCK))
+	ROOTFS_FREE=$((ROOTFS_BLOCKS - ROOTFS_USED))
+	say "    rootfs: $ROOTFS_USED/$ROOTFS_BLOCKS erase blocks, $ROOTFS_FREE free"
+	[ "$ROOTFS_FREE" -ge "$ROOTFS_RESERVE_PEB" ] ||
+		die "the rootfs leaves $ROOTFS_FREE erase block(s) free of $ROOTFS_BLOCKS; the minimum is $ROOTFS_RESERVE_PEB (1 MiB).
+  The OTA updater erases the whole partition before it writes, and mtdinfo
+  cannot see NAND bad blocks: an image this close to the end bricks the device
+  on the first bad block. Remove something from the rootfs, use a base that
+  does not duplicate the stock Wi-Fi driver/firmware, or make the image fit
+  some other way before shipping it."
+	[ "$ROOTFS_FREE" -ge "$ROOTFS_WARN_PEB" ] ||
+		warn "the rootfs leaves only $ROOTFS_FREE erase block(s) free; $ROOTFS_WARN_PEB or more is the comfortable margin."
 
 	step "[$MODEL_NAME] updating ota_update.in"
 	if [ -f "$KERNEL_NEW" ]; then
@@ -955,9 +1102,12 @@ build_one() {
 		# alike. It has to fit in the kernel partition.
 		X_SIZE="$(get_size "$KERNEL_NEW")"
 		X_MD5="$(get_md5 "$KERNEL_NEW")"
-		[ "$X_SIZE" -le "$KERNEL_MAX" ] ||
-			die "kernel/xImage-$MODEL_DIR is $X_SIZE bytes, $((X_SIZE - KERNEL_MAX)) more than the $KERNEL_MAX-byte kernel partition."
-		say "    xImage: kernel/xImage-$MODEL_DIR, $X_SIZE bytes, md5 $X_MD5 (max: $KERNEL_MAX bytes)"
+		KERNEL_BLOCKS=$((KERNEL_PART / ERASE_BLOCK))
+		KERNEL_USED=$(((X_SIZE + ERASE_BLOCK - 1) / ERASE_BLOCK))
+		KERNEL_FREE=$((KERNEL_BLOCKS - KERNEL_USED))
+		[ "$KERNEL_FREE" -ge "$KERNEL_RESERVE_PEB" ] ||
+			die "kernel/xImage-$MODEL_DIR leaves $KERNEL_FREE erase block(s) free of $KERNEL_BLOCKS; the minimum is $KERNEL_RESERVE_PEB."
+		say "    xImage: kernel/xImage-$MODEL_DIR, $X_SIZE bytes, md5 $X_MD5 ($KERNEL_USED/$KERNEL_BLOCKS erase blocks, $KERNEL_FREE free)"
 	else
 		# The stock kernel stays, so its two lines are carried over exactly as
 		# they were: recomputing them from a file this script never writes
@@ -967,6 +1117,13 @@ build_one() {
 		[ -n "$X_SIZE" ] && [ -n "$X_MD5" ] || die "cannot read the kernel entry from ota_update.in."
 		say "    xImage: the stock kernel, unchanged"
 	fi
+
+	KERNEL_BLOCKS=$((KERNEL_PART / ERASE_BLOCK))
+	KERNEL_USED=$(((X_SIZE + ERASE_BLOCK - 1) / ERASE_BLOCK))
+	KERNEL_FREE=$((KERNEL_BLOCKS - KERNEL_USED))
+	say "    kernel: $KERNEL_USED/$KERNEL_BLOCKS erase blocks, $KERNEL_FREE free"
+	[ "$KERNEL_FREE" -ge "$KERNEL_RESERVE_PEB" ] ||
+		die "the kernel leaves $KERNEL_FREE erase block(s) free of $KERNEL_BLOCKS; the minimum is $KERNEL_RESERVE_PEB."
 
 	cat > "$OTA_DIR/ota_update.in" <<-EOF
 	ota_version=0
@@ -1004,6 +1161,17 @@ build_one() {
 	"$ISO_TOOL" -o "$OUTPUT_UPT" -J -r "$WORK_DIR" > /dev/null 2>&1
 
 	[ -f "$OUTPUT_UPT" ] || die "the image was not written."
+
+	# The packer's own checks run while the tree is still here. This one reads
+	# the finished ISO: chunks, md5 chains, sizes and the kernel/module match,
+	# so a bug in the packing path cannot produce something that only looks
+	# right. The same script can be run by hand on a release or a test image.
+	step "[$MODEL_NAME] verifying $(basename "$OUTPUT_UPT")"
+	"$SCRIPT_DIR/verify_upt.sh" --model "$MODEL_DIR" --upt "$OUTPUT_UPT" \
+		--player "$PLAYER_BIN" --device "$MODEL_NAME" --lock "$IMAGE_LOCK" || {
+		discard_failed_image "$OUTPUT_UPT"
+		die "the image failed verification; it must not be published."
+	}
 
 	cleanup
 

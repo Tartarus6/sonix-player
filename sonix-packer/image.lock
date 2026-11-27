@@ -1,0 +1,23 @@
+# Flash layout, one line per model.
+#
+# model|rootfs partition|erase block|kernel partition
+#
+# The R1 numbers come from its cloner config, configs/x1600/x16xx_sfc_nand_linux.cfg
+# in HiBy's recovery package, and match /proc/mtd on the device:
+#
+#   mtd1: 00500000 00020000 "kernel"
+#   mtd2: 02d00000 00020000 "rootfs"
+#
+# The R3 Pro II uses the same x1600 NAND layout. Its 1.3.0 rootfs is 44,556,288
+# bytes, which only fits a 45 MiB rootfs partition; the stock rootfs is 33,824,768.
+# If a device ever reports a different /proc/mtd, add its own line here rather
+# than relax the numbers below.
+#
+# A build must leave ROOTFS_RESERVE_PEB erase blocks free in the rootfs and
+# KERNEL_RESERVE_PEB in the kernel. NAND bad blocks are invisible to mtdinfo:
+# the partition size is nominal, and the OTA updater erases the partition before
+# it writes it, so a rootfs that only just fits bricks the device on the first
+# bad block. The 1.3.0 image left 19 rootfs erase blocks free; the issue-147
+# test image left one. The reserve is what keeps that from shipping again.
+R1|0x2d00000|0x20000|0x500000
+R3PII|0x2d00000|0x20000|0x500000

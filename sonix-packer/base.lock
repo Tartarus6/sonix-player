@@ -1,0 +1,20 @@
+# Stock firmware bases the packer may start from.
+#
+# md5|filename|stock kernel|note
+#
+# The stock firmware is not in the repository (it is HiBy's), so its identity
+# has to be pinned here. A base that is not listed is refused: an unknown base
+# can change the kernel, the partition contents or both, and the modules we
+# ship are built for one kernel only.
+#
+# The kernel column is what the base's stock kernel reports. It is informative:
+# the packer reads the kernel and every module in the finished rootfs and
+# refuses a mismatch, so a v2.0 base with a v1.6 kernel fails even though both
+# hashes are accepted.
+#
+# Updating a base is a deliberate change: run the packer, read the kernel and
+# module versions it prints, and add the new line in the same commit as the
+# kernel or modules that make it valid.
+494e7bfbd46d623ceb56938c042f576e|r1_original.upt|Linux-4.4.94-sonix|HiBy R1 v1.6
+c9577de224859fc76272ca340ed6eb82|r1_original.upt|Linux-4.4.94+|HiBy R1 v2.0
+5d51362acdb2bb1ee0d4cd97742d3b9b|r3proii_original.upt|Linux-4.4.94-sonix|HiBy R3 Pro II v1.4
