@@ -13,6 +13,12 @@
 // usr/resource/sonix/fonts/ebook; a set in `.local/fonts/` on the card is used
 // when that folder has none.
 //
+// Script fallback fonts (Korean, Japanese, Thai, Arabic) from the firmware's
+// fonts folder are chained behind the primary face so glyphs the primary lacks
+// (e.g. Hangul) still render, regardless of EPUB language metadata. They are
+// looked up as .otf first, then .ttf, in the resource tree and the host
+// fallback folder.
+//
 // So: nothing is loaded until the reader opens, the regular face is loaded
 // then, and the other three only when a book actually uses them -- a novel
 // with no bold never pays for the bold face. Closing the reader destroys all
@@ -45,8 +51,9 @@ int ebookfonts_size(void);
 // to italic to bold to regular -- rather than making the book unreadable.
 const lv_font_t *ebookfonts_face(bool bold, bool italic);
 
-// True when Bookerly was found. The settings page says so, because a reader
-// that quietly uses the interface font looks like a reader with a bug.
+// True when Bookerly (or the Japanese primary face) was found. The settings
+// page says so, because a reader that quietly uses the interface font looks
+// like a reader with a bug.
 bool ebookfonts_present(void);
 
 #endif /* EBOOKFONTS_H */
