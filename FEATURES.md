@@ -104,13 +104,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **Radio** - thousands of stations by country, language or genre, plus search, favourites and recently played. MP3, AAC and FLAC stations.
   > **My stations** - write your own list in a `radio.txt` file in the root of the card, one station per line: `name, address`.
 - **ListenBrainz** - scrobbles what you listen to to ListenBrainz with a user token. Without Wi-Fi the plays are kept and sent the next time the player connects.
-
-> [!NOTE]
-> **last.fm**
->
-> The code fully supports last.fm, but the standard Sonix OS release does not have this feature enabled due to issues with sourcing the API keys for it.
-> 
-> To re-enable it (if you are forking Sonix) just edit `musicsettings.c`, uncommenting the lines for initializing last.fm and for adding the last.fm settings to the page. Also edit `main.c` to uncomment the `lastfm_init()` call.
+- **Last.fm** - scrobbles with your own API key. Sign in from Music settings → Last.fm by scanning the QR code with your phone and pressing Done on the player. Without Wi-Fi the plays wait and are sent on the next connection. See README "Streaming keys" for the key.
 
 ## Podcasts
 

@@ -1961,7 +1961,7 @@ int main(int argc, char **argv) {
 	streamkeys_init();
 	qobuz_init();
 	tidal_init();
-	// lastfm_init();
+	lastfm_init();
 	listenbrainz_init();
 
 	lv_init();

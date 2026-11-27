@@ -19,15 +19,17 @@
 // the wire.
 //
 // The API account comes from the streaming keys ([lastfm]); without it the
-// service is unavailable. Signing in trades the username and password for a
-// session key (auth.getMobileSession), which is what is kept, beside
-// device_config.ini; the password is not.
+// service is unavailable. Signing in fetches an auth token (auth.getToken),
+// the user authorizes it at last.fm/api/auth, and auth.getSession trades it
+// for a session key. Only the session key is kept, beside device_config.ini;
+// no password is ever entered on the device.
 
 typedef enum {
 	LASTFM_STATE_UNAVAILABLE, // no API keys in the streaming keys
 	LASTFM_STATE_OFF,
 	LASTFM_STATE_SIGNED_OUT,
 	LASTFM_STATE_SIGNING_IN,
+	LASTFM_STATE_AWAITING_AUTH, // token fetched, waiting for the user
 	LASTFM_STATE_CONNECTED,
 	LASTFM_STATE_SESSION_EXPIRED, // Last.fm refused the session: sign in again
 	LASTFM_STATE_REFUSED,		  // Last.fm refused a request; `detail` says why
@@ -35,9 +37,10 @@ typedef enum {
 
 typedef enum {
 	LASTFM_LOGIN_OK,
-	LASTFM_LOGIN_WRONG_CREDENTIALS,
 	LASTFM_LOGIN_NO_REPLY,
 	LASTFM_LOGIN_REFUSED, // `detail` says why
+	LASTFM_LOGIN_EXPIRED, // the token was not used within its 60 minutes
+	LASTFM_LOGIN_NOT_AUTHORIZED, // error 14: the user has not approved it yet
 } lastfm_login_result_t;
 
 typedef struct {
@@ -50,6 +53,12 @@ typedef struct {
 	// Moves each time a sign-in attempt finishes; `login_result` is how it did.
 	unsigned login_serial;
 	lastfm_login_result_t login_result;
+
+	// The authorization URL for the live token, and when it was last handed
+	// out or cleared. `auth_seconds_left` counts down to the 60-minute limit.
+	char auth_url[256];
+	unsigned auth_serial;
+	int auth_seconds_left;
 } lastfm_status_t;
 
 // Reads the session and the queue and starts the worker. Call once, after
@@ -65,9 +74,11 @@ void lastfm_set_enabled(bool on);
 // to be renewed: plays are being counted.
 bool lastfm_active(void);
 
-// Both return at once; the worker does the work. The password is wiped as soon
-// as the request has been built.
-void lastfm_login(const char *user, const char *password);
+// Both return at once; the worker does the work. Begin fetches a token and
+// publishes its authorization URL in the status; complete trades it for a
+// session key after the user has approved it on last.fm.
+void lastfm_begin_login(void);
+void lastfm_complete_login(void);
 void lastfm_logout(void);
 
 void lastfm_get_status(lastfm_status_t *out);

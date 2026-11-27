@@ -1901,8 +1901,8 @@ void musicsettings_init(gui_config_t *cfg) {
 
 	// NOTE: last.fm settings won't be available by default because the default Sonix player does not come with the API keys for it.
 	// TODO: once a plugin system is implemented, remove last.fm from the stock player, and package it as a plugin instead.
-	// lastfmsettings_init(cfg);
-	// settingsrow_add(container, "lastfm", NULL, switch_screen_cb, lastfmsettings_screen());
+	lastfmsettings_init(cfg);
+	settingsrow_add(container, "lastfm", NULL, switch_screen_cb, lastfmsettings_screen());
 
 	listenbrainzsettings_init(cfg);
 	settingsrow_add(container, "listenbrainz", NULL, switch_screen_cb, listenbrainzsettings_screen());
