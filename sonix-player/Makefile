@@ -21,6 +21,11 @@ CC = gcc
 CXX = g++
 CROSS_CC ?= $(ROCKBOX_TOOLCHAIN_DIR)/bin/mipsel-rockbox-linux-gnu-gcc
 CROSS_CXX ?= $(ROCKBOX_TOOLCHAIN_DIR)/bin/mipsel-rockbox-linux-gnu-g++
+ifeq ($(CROSS_CC),$(ROCKBOX_TOOLCHAIN_DIR)/bin/mipsel-rockbox-linux-gnu-gcc)
+TOOLCHAIN_READY = $(ROCKBOX_TOOLCHAIN_DIR)/.sonix-ready
+else
+TOOLCHAIN_READY = $(CROSS_CC)
+endif
 
 # The interface uses the per-flag object API (lv_obj_set_hidden() and the
 # rest) and lv_text_ap_strlen(), neither of which exists before 9.6. It also
@@ -295,7 +300,7 @@ LAUNCH_CFLAGS = -Os -Wall -Wextra -march=mips32r2 -mno-abicalls -fno-pic -G0 -st
 				-ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns -fno-stack-protector \
 				-fno-asynchronous-unwind-tables -Wl,-e,__start
 
-$(LAUNCH_BIN): launcher/sonix_launch.c $(CROSS_CC)
+$(LAUNCH_BIN): launcher/sonix_launch.c $(TOOLCHAIN_READY)
 	$(CROSS_CC) $(LAUNCH_CFLAGS) -o $@ $<
 	@if [ -x "$(CROSS_STRIP)" ]; then $(CROSS_STRIP) $@; fi
 	@echo "sonix_launch: $$(wc -c < $@) bytes"
@@ -406,12 +411,12 @@ libs-clean:
 
 # Make sure the cross compiler is built before trying to make any of the target
 # objects with it.
-$(TARGET_OBJS): $(CROSS_CC) $(FREETYPE_PREFIX)/lib/libfreetype.a $(AUDIO_LIBS)
+$(TARGET_OBJS): $(TOOLCHAIN_READY) $(FREETYPE_PREFIX)/lib/libfreetype.a $(AUDIO_LIBS)
 $(TARGET_BIN): $(FREETYPE_PREFIX)/lib/libfreetype.a $(AUDIO_LIBS)
 
-$(CROSS_CC):
+$(ROCKBOX_TOOLCHAIN_DIR)/.sonix-ready:
 	@echo "Building Rockbox toolchain..."
-	./rockboxdev/rockboxdev.sh
+	env -u MAKEFLAGS RBDEV_HOST_PREFIX="$(ROCKBOX_TOOLCHAIN_DIR)" ./rockboxdev/rockboxdev.sh
 
 # The flags FreeType and the audio libraries are built with. -march and -mplt as
 # in TARGET_CFLAGS: they are static, so they end up in the same executable. They
@@ -421,7 +426,7 @@ LIB_CFLAGS = -O2 -march=mips32r2 -mplt
 
 # Cross-build FreeType, once. configure needs the toolchain on PATH for
 # ranlib/ar to be found under their host-triplet names.
-$(FREETYPE_PREFIX)/lib/libfreetype.a: $(CROSS_CC)
+$(FREETYPE_PREFIX)/lib/libfreetype.a: $(TOOLCHAIN_READY)
 	@echo "Building static FreeType $(FREETYPE_VER) for the target..."
 	@if [ ! -f $(FREETYPE_TARBALL) ]; then \
 		wget -O $(FREETYPE_TARBALL) $(FREETYPE_URL) || \
@@ -452,7 +457,7 @@ CROSS_TOOLS = CC=$(CROSS_CC) CFLAGS="$(LIB_CFLAGS)" \
 			  RANLIB=$(ROCKBOX_TOOLCHAIN_DIR)/bin/mipsel-rockbox-linux-gnu-ranlib
 CROSS_COMMON = --host=mipsel-rockbox-linux-gnu --prefix=$(AUDIO_PREFIX) --disable-shared --enable-static
 
-$(OGG_LIB): $(CROSS_CC)
+$(OGG_LIB): $(TOOLCHAIN_READY)
 	@echo "Building static libogg $(OGG_VER) for the target..."
 	@if [ ! -f $(OGG_TARBALL) ]; then \
 		wget -O $(OGG_TARBALL) $(OGG_URL) || wget -O $(OGG_TARBALL) $(OGG_URL_MIRROR); \
@@ -464,7 +469,7 @@ $(OGG_LIB): $(CROSS_CC)
 
 # --enable-fixed-point: integer decoder, bit-exact across platforms. The float
 # API stays compiled in -- removing it would take --disable-float-api.
-$(OPUS_LIB): $(CROSS_CC)
+$(OPUS_LIB): $(TOOLCHAIN_READY)
 	@echo "Building static libopus $(OPUS_VER) for the target..."
 	@if [ ! -f $(OPUS_TARBALL) ]; then \
 		wget -O $(OPUS_TARBALL) $(OPUS_URL) || wget -O $(OPUS_TARBALL) $(OPUS_URL_MIRROR); \
@@ -480,7 +485,7 @@ $(OPUS_LIB): $(CROSS_CC)
 # PKG_CHECK_MODULES, and no pkg-config here knows the cross sysroot. Passing
 # them skips the search. --disable-http drops the stream support that would
 # pull in OpenSSL.
-$(OPUSFILE_LIB): $(CROSS_CC) $(OGG_LIB) $(OPUS_LIB)
+$(OPUSFILE_LIB): $(TOOLCHAIN_READY) $(OGG_LIB) $(OPUS_LIB)
 	@echo "Building static opusfile $(OPUSFILE_VER) for the target..."
 	@if [ ! -f $(OPUSFILE_TARBALL) ]; then \
 		wget -O $(OPUSFILE_TARBALL) $(OPUSFILE_URL) || wget -O $(OPUSFILE_TARBALL) $(OPUSFILE_URL_MIRROR); \
@@ -498,7 +503,7 @@ $(OPUSFILE_LIB): $(CROSS_CC) $(OGG_LIB) $(OPUS_LIB)
 # costs a few kilobytes. --enable-dsd keeps DSD inside WavPack, which the
 # wrapper opens with OPEN_DSD_AS_PCM. --disable-asm because the assembly wavpack
 # ships is for x86 and ARM.
-$(WAVPACK_LIB): $(CROSS_CC)
+$(WAVPACK_LIB): $(TOOLCHAIN_READY)
 	@echo "Building static libwavpack $(WAVPACK_VER) for the target..."
 	@if [ ! -f $(WAVPACK_TARBALL) ]; then \
 		wget -O $(WAVPACK_TARBALL) $(WAVPACK_URL) || wget -O $(WAVPACK_TARBALL) $(WAVPACK_URL_MIRROR); \

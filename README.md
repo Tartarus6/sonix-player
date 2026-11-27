@@ -191,9 +191,14 @@ The device's buttons are on the keyboard:
 
 ### What you need
 
-The host requirements above, plus `wget`, `texinfo`, `bison`, `flex` and about
-2 GB of disk: the first target build compiles a MIPS cross toolchain from
-source.
+The first target build compiles a MIPS cross toolchain from source. On Debian, install these packages in addition to the host requirements above:
+
+```bash
+sudo apt install wget texinfo bison flex m4 gawk autotools-dev \
+                 libgmp-dev libmpfr-dev libmpc-dev
+```
+
+Allow several gigabytes of free disk space for the downloaded sources and build files.
 
 ### Build
 
@@ -210,6 +215,10 @@ The first run takes a while and does four things by itself:
 4. compiles and links `sonix_player`, and builds `sonix_launch` (see below)
 
 Steps 1 to 3 happen once. Later builds go straight to step 4.
+
+If the toolchain build stops, rerun the same command. Completed toolchain stages are kept in `rockbox-toolchain/.stages/` and the failed stage starts again from the cached download. Its log is in `tmp/rbdev-build/`.
+
+The build writes `rockbox-toolchain/.sonix-ready` only after the full C/C++ compiler, glibc and ALSA are installed. An older toolchain without these markers will be built again the first time you use this version.
 
 Everything the device does not already carry is linked statically, so the
 result is one file to copy across with nothing to install beside it. The same
