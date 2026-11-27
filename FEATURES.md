@@ -22,7 +22,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 > Scan the library from Settings > Music. You choose which folders of the card are scanned.
 
-- **Main page** - All tracks, Albums, Artists, Album artists, Genres, Years, Favourites, Most played, Playlists and Browse. You can rearrange the tiles and hide the ones you don't use.
+- **Main page** - All tracks, Albums, Artists, Album artists, Genres, Years, Favourites, Most played, Playlists, Collections and Browse. You can rearrange the tiles and hide the ones you don't use.
 - **Browse** - go through the folders of the card as they are.
 - **Search** across tracks, albums and artists.
 - **Sorting** - by name (A-Z or Z-A), by date added (newest or oldest first) or by year.
@@ -42,6 +42,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **Selection** - long press a track, album or artist to select more, then add them all to the queue, to the favourites or to a playlist, or remove them from a playlist.
 - **Delete tracks** from the card, after asking (turn it on in the settings first).
 - **Playlists** - create, rename, reorder and delete. You can back them up to the card as `.m3u` files that other players can read, and import `.m3u` playlists back, even when some files were moved.
+- **Collections** - a new tile for shelves of whole albums: create, rename and delete them, then add albums from the Albums list or Now Playing. Open an album from a collection, or play the whole collection in order or shuffled. An album that leaves the library stays visible as missing and can be removed.
 
 ## Playback
 

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "src/gui/library/browser.h"
+#include "src/gui/library/collectionspage.h"
 #include "src/gui/library/libraryscan.h"
 #include "src/gui/nowplaying/coverflow.h"
 #include "src/gui/shell/gridpage.h"
@@ -42,6 +43,7 @@ static void open_most_played(void) {
 }
 static void open_browse(void) { switch_screen(browser_screen); }
 static void open_playlists(void) { playlistpage_open(); }
+static void open_collections(void) { collectionspage_open(); }
 
 static lv_obj_t *tile_grid;
 static gui_config_t *grid_cfg;
@@ -72,6 +74,8 @@ static const struct {
 	[MUSIC_TILE_MOST_PLAYED] = {"most_played",
 								{"music_most_played", &icon_menu_most_played, NULL, open_most_played}},
 	[MUSIC_TILE_PLAYLISTS] = {"playlists", {"playlists", &icon_menu_playlist, NULL, open_playlists}},
+	[MUSIC_TILE_COLLECTIONS] = {"collections",
+								{"collections", &icon_menu_collection, NULL, open_collections}},
 	[MUSIC_TILE_BROWSE] = {"browse", {"music_browse", &icon_menu_explorer, NULL, open_browse}},
 };
 

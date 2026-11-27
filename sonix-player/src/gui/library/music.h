@@ -6,8 +6,9 @@
 #include "lvgl/lvgl.h"
 
 // The Music page: the library's index tiles (all tracks, albums, artists,
-// album artists, genres, years), the favourites, the most played, the playlists
-// and the file browser, with music settings and search on the corner buttons.
+// album artists, genres, years), the favourites, the most played, the playlists,
+// the collections and the file browser, with music settings and search on the
+// corner buttons.
 extern lv_obj_t *music_screen;
 
 void music_init(gui_config_t *cfg);
@@ -23,6 +24,7 @@ typedef enum {
 	MUSIC_TILE_FAVOURITES,
 	MUSIC_TILE_MOST_PLAYED,
 	MUSIC_TILE_PLAYLISTS,
+	MUSIC_TILE_COLLECTIONS,
 	MUSIC_TILE_BROWSE,
 	MUSIC_TILE_COUNT,
 } music_tile_t;

@@ -418,6 +418,7 @@ COLOR_ICONS = [
     ("most-played.png", "menu_most_played", SECTION_ICON_SIZE),
     ("explorer.png", "menu_explorer", SECTION_ICON_SIZE),
     ("playlist.png", "menu_playlist", SECTION_ICON_SIZE),
+    ("collection.png", "menu_collection", SECTION_ICON_SIZE),
     ("streaming.png", "menu_streaming", MAIN_MENU_ICON_SIZE),
     ("wireless.png", "menu_wireless", MAIN_MENU_ICON_SIZE),
     # The Wireless section's own grid.

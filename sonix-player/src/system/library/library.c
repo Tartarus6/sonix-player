@@ -170,6 +170,23 @@ static const char *const SCHEMA[] = {
 	// one row. A database without it was filed with nothing split or joined.
 	"CREATE TABLE IF NOT EXISTS ORGANIZE_STATE(id INT PRIMARY KEY, rules TEXT)",
 
+	// Local: a named shelf of whole albums. `id` is the collection's identity;
+	// names are data and never identify one, so a rename touches nothing else.
+	// NOCASE on the name fixes the case collision the playlist tables have:
+	// "Sera" and "sera" are one collection.
+	"CREATE TABLE IF NOT EXISTS SONIX_COLLECTION(id INTEGER PRIMARY KEY AUTOINCREMENT,"
+	" name TEXT NOT NULL COLLATE NOCASE UNIQUE, created INT)",
+
+	// The albums a collection holds. `idx` is insertion order and the stable
+	// position the page reads; removals leave holes and that is fine. The name
+	// and key stay in separate columns rather than one album value, because a
+	// 255-byte name plus its key is longer than the 256-byte buffers the rest
+	// of the player has. The artist, folder and first path are snapshots taken
+	// when the album went in: fallbacks for resolution and for a missing row.
+	"CREATE TABLE IF NOT EXISTS SONIX_COLLECTION_ITEM(collection INT NOT NULL, idx INT NOT NULL,"
+	" album TEXT NOT NULL COLLATE NOCASE, album_key TEXT NOT NULL, artist TEXT, folder TEXT,"
+	" first_path TEXT, PRIMARY KEY(collection, idx), UNIQUE(collection, album, album_key))",
+
 	"CREATE TABLE IF NOT EXISTS VERSION_TABLE( version_id INT,PRIMARY KEY(version_id))",
 	"CREATE TABLE IF NOT EXISTS COUNT_TABLE( cn INT)",
 };
@@ -227,6 +244,11 @@ static const char *const SCHEMA_INDEXES[] = {
 	"CREATE INDEX IF NOT EXISTS album_artist_link_path_idx ON ALBUM_ARTIST_LINK(path)",
 	"CREATE INDEX IF NOT EXISTS genre_link_name_idx ON GENRE_LINK(genre)",
 	"CREATE INDEX IF NOT EXISTS genre_link_path_idx ON GENRE_LINK(path)",
+	// Which collections already hold an album, by name and key: the resolver
+	// asks this while checking for a duplicate, and a collection's own rows
+	// are read by its primary key instead.
+	"CREATE INDEX IF NOT EXISTS sonix_collection_item_album_idx"
+	" ON SONIX_COLLECTION_ITEM(album, album_key)",
 };
 
 // Built only once every row has a key: an index on a column that is still half
@@ -344,10 +366,12 @@ typedef enum {
 	GEN_FAVOURITES,
 	GEN_PLAYLISTS, // the M3U_ tables: their own, so editing one does not
 				   // invalidate a list of tracks and vice versa
+	GEN_COLLECTIONS, // the SONIX_COLLECTION tables, apart from both for the
+					 // same reason
 	GEN_COUNT,
 } gen_domain_t;
 
-static unsigned generation[GEN_COUNT] = {1, 1, 1};
+static unsigned generation[GEN_COUNT] = {1, 1, 1, 1};
 
 static gen_domain_t domain_of(library_list_t kind) {
 	switch (kind) {
@@ -1467,7 +1491,7 @@ static bool playlist_table(const char *name, char *out, size_t out_size);
 static const char *const KEPT_TABLES[] = {
 	"FAVOURITES",			"PLAYBACK_STATE",		"PLAYBACK_QUEUE", "PLAYBACK_QUEUE_STATE",
 	"PLAYBACK_QUEUE_QUERY", "PLAYBACK_QUEUE_ALBUM", "PLAYLIST_MIGRATION",   "PLAY_COUNTS",
-	"PLAY_HISTORY",
+	"PLAY_HISTORY",			"SONIX_COLLECTION",		"SONIX_COLLECTION_ITEM",
 };
 
 // Copies one table from the attached damaged file. A table the damage reaches
@@ -1885,6 +1909,122 @@ int library_album_places(const char *album, uint16_t *disc, uint16_t *track, int
 	}
 	pthread_mutex_unlock(&db_lock);
 	return count;
+}
+
+// The folder a path lives in, into `out`: the first track's folder, kept with
+// a collection item so a missing album can still say where it lived.
+static void path_folder(const char *path, char *out, size_t out_size) {
+	snprintf(out, out_size, "%s", path ? path : "");
+	char *slash = strrchr(out, '/');
+	if (!slash) {
+		out[0] = '\0';
+	} else if (slash == out) {
+		slash[1] = '\0';
+	} else {
+		*slash = '\0';
+	}
+}
+
+// One snapshot row selected as album, album_key, artist, path.
+static void album_snapshot_read(sqlite3_stmt *stmt, library_album_snapshot_t *out) {
+	const char *text = (const char *)sqlite3_column_text(stmt, 0);
+	snprintf(out->title, sizeof(out->title), "%s", text ? text : "");
+	text = (const char *)sqlite3_column_text(stmt, 1);
+	snprintf(out->key, sizeof(out->key), "%s", text ? text : "");
+	text = (const char *)sqlite3_column_text(stmt, 2);
+	snprintf(out->artist, sizeof(out->artist), "%s", text ? text : "");
+	text = (const char *)sqlite3_column_text(stmt, 3);
+	snprintf(out->first_path, sizeof(out->first_path), "%s", text ? text : "");
+	path_folder(out->first_path, out->folder, sizeof(out->folder));
+}
+
+bool library_album_snapshot(const char *album_value, library_album_snapshot_t *out) {
+	if (!out) {
+		return false;
+	}
+	memset(out, 0, sizeof(*out));
+	if (!album_value || !album_value[0]) {
+		return false;
+	}
+
+	pthread_mutex_lock(&db_lock);
+	bool found = false;
+	sqlite3_stmt *stmt = NULL;
+	if (db && sqlite3_prepare_v2(db,
+								 "SELECT album, album_key, COALESCE(NULLIF(album_artist,''), artist), path"
+								 " FROM MEDIA_TABLE WHERE " ALBUM_VALUE_MATCH " ORDER BY " TRACK_ORDER_IN_ALBUM
+								 " LIMIT 1",
+								 -1, &stmt, NULL) == SQLITE_OK) {
+		sqlite3_bind_text(stmt, 1, album_value, -1, SQLITE_TRANSIENT);
+		if (sqlite3_step(stmt) == SQLITE_ROW) {
+			album_snapshot_read(stmt, out);
+			found = true;
+		}
+		sqlite3_finalize(stmt);
+	}
+	pthread_mutex_unlock(&db_lock);
+	return found;
+}
+
+// Every album matching `value` as a snapshot, from the SQL the caller named.
+// Runs with db_lock held, so the callback must copy what it needs and must not
+// call back into the library.
+static int album_snapshots_locked(const char *sql, const char *value, library_album_snapshot_cb cb, void *user) {
+	sqlite3_stmt *stmt = NULL;
+	int count = 0;
+	if (!db || sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+		return 0;
+	}
+	sqlite3_bind_text(stmt, 1, value, -1, SQLITE_TRANSIENT);
+	while (sqlite3_step(stmt) == SQLITE_ROW) {
+		library_album_snapshot_t snapshot;
+		memset(&snapshot, 0, sizeof(snapshot));
+		album_snapshot_read(stmt, &snapshot);
+		count++;
+		if (!cb(&snapshot, user)) {
+			break;
+		}
+	}
+	sqlite3_finalize(stmt);
+	return count;
+}
+
+// One album per row of ALBUM_GROUP_TABLE, with its first track's artist and
+// path -- the same row the Albums list draws.
+#define ALBUM_SNAPSHOT_SQL                                                                                             \
+	"SELECT g.album, g.album_key, " ALBUM_GROUP_FIRST("COALESCE(NULLIF(m.album_artist,''), m.artist)") ", "             \
+	ALBUM_GROUP_FIRST("m.path") " FROM ALBUM_GROUP_TABLE g WHERE "
+
+int library_album_values_named(const char *name, library_album_snapshot_cb cb, void *user) {
+	if (!name || !name[0] || !cb) {
+		return 0;
+	}
+
+	pthread_mutex_lock(&db_lock);
+	// The indexed NOCASE match first: album is COLLATE NOCASE, so this is the
+	// case a retag that only changed case still hits. Only when it finds
+	// nothing does the folded comparison run, having no index to serve it.
+	int count = album_snapshots_locked(ALBUM_SNAPSHOT_SQL "g.album = ?1", name, cb, user);
+	if (count == 0) {
+		count = album_snapshots_locked(ALBUM_SNAPSHOT_SQL "foldcase(g.album) = foldcase(?1)", name, cb, user);
+	}
+	pthread_mutex_unlock(&db_lock);
+	return count;
+}
+
+int library_album_values_with_key(const char *key, library_album_snapshot_cb cb, void *user) {
+	if (!key || !key[0] || !cb) {
+		return 0;
+	}
+
+	pthread_mutex_lock(&db_lock);
+	int count = album_snapshots_locked(ALBUM_SNAPSHOT_SQL "g.album_key = ?1", key, cb, user);
+	pthread_mutex_unlock(&db_lock);
+	return count;
+}
+
+void library_fold_text(const char *in, char *out, size_t size) {
+	fold_text(in, out, size);
 }
 
 bool library_track_names(const char *path, char *title_out, size_t title_size, char *artist_out, size_t artist_size) {
@@ -2568,7 +2708,7 @@ struct library_index {
 	library_list_t kind;
 	library_filter_t filter;
 	library_order_t order;
-	char value[256];
+	char value[LIBRARY_ALBUM_VALUE_MAX];
 
 	bool desc; // the list reads backwards; the rows are always stored ascending
 	gen_domain_t domain;
@@ -3267,7 +3407,7 @@ int library_index_find_name(const library_index_t *ix, const char *name) {
 	// An album is one row of ALBUM_GROUP_TABLE per name and key, so a value
 	// with a key finds its own record and a name alone the first of that name.
 	const char *sql;
-	char album[256];
+	char album[LIBRARY_ALBUM_VALUE_MAX];
 	const char *key = NULL;
 	switch (ix->kind) {
 	case LIBRARY_LIST_ALBUMS: {
@@ -8098,4 +8238,534 @@ int library_search(const char *query, int per_category, library_search_cb_t cb, 
 	}
 	pthread_mutex_unlock(&db_lock);
 	return total;
+}
+
+// ---------------------------------------------------------------------------
+// Collections
+//
+// A collection is one row; its albums are rows of another. An album is named
+// by its name and key, taken from the index when it went in, and never by a
+// MEDIA_TABLE row id -- the scan hands those out again. The artist, folder and
+// first path stored beside it are snapshots: what a missing album is still
+// shown by, and what the resolver corroborates a candidate against.
+//
+// `idx` is insertion order and the item's stable position. Removals leave
+// holes, so a position is not a rank; the page hands back the idx it read.
+//
+// The writer is the playlist writer's pattern with albums instead of tracks:
+// one savepoint, one item in memory, the next index worked out once. The lock
+// is taken per row and given back between them, so a caller that resolves the
+// next album between two rows does not deadlock on this non-recursive lock.
+// ---------------------------------------------------------------------------
+
+#define COLLECTION_SAVEPOINT "collection_write"
+
+static bool collection_exists_locked(int id) {
+	sqlite3_stmt *stmt = NULL;
+	bool found = false;
+	if (sqlite3_prepare_v2(db, "SELECT 1 FROM SONIX_COLLECTION WHERE id=?1 LIMIT 1", -1, &stmt, NULL) == SQLITE_OK) {
+		sqlite3_bind_int(stmt, 1, id);
+		found = sqlite3_step(stmt) == SQLITE_ROW;
+		sqlite3_finalize(stmt);
+	}
+	return found;
+}
+
+static int collection_id_named_locked(const char *name) {
+	sqlite3_stmt *stmt = NULL;
+	int id = 0;
+	if (sqlite3_prepare_v2(db, "SELECT id FROM SONIX_COLLECTION WHERE name=?1 LIMIT 1", -1, &stmt, NULL) ==
+		SQLITE_OK) {
+		sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT);
+		if (sqlite3_step(stmt) == SQLITE_ROW) {
+			id = sqlite3_column_int(stmt, 0);
+		}
+		sqlite3_finalize(stmt);
+	}
+	return id;
+}
+
+// Runs a statement whose only parameter is a collection id. With db_lock held.
+static bool collection_exec_id(const char *sql, int id, int *changes) {
+	sqlite3_stmt *stmt = NULL;
+	bool ok = false;
+	if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+		sqlite3_bind_int(stmt, 1, id);
+		ok = sqlite3_step(stmt) == SQLITE_DONE;
+		if (ok && changes) {
+			*changes = sqlite3_changes(db);
+		}
+		sqlite3_finalize(stmt);
+	}
+	return ok;
+}
+
+// One item row selected as idx, album, album_key, artist, folder, first_path.
+static void collection_item_read(sqlite3_stmt *stmt, library_collection_item_t *item) {
+	item->idx = sqlite3_column_int(stmt, 0);
+	const char *text = (const char *)sqlite3_column_text(stmt, 1);
+	snprintf(item->album, sizeof(item->album), "%s", text ? text : "");
+	text = (const char *)sqlite3_column_text(stmt, 2);
+	snprintf(item->album_key, sizeof(item->album_key), "%s", text ? text : "");
+	text = (const char *)sqlite3_column_text(stmt, 3);
+	snprintf(item->artist, sizeof(item->artist), "%s", text ? text : "");
+	text = (const char *)sqlite3_column_text(stmt, 4);
+	snprintf(item->folder, sizeof(item->folder), "%s", text ? text : "");
+	text = (const char *)sqlite3_column_text(stmt, 5);
+	snprintf(item->first_path, sizeof(item->first_path), "%s", text ? text : "");
+}
+
+int library_collection_create(const char *name) {
+	if (!name || !name[0]) {
+		return -1;
+	}
+
+	int id = -1;
+	pthread_mutex_lock(&db_lock);
+	if (db) {
+		sqlite3_stmt *stmt = NULL;
+		if (sqlite3_prepare_v2(db, "INSERT INTO SONIX_COLLECTION(name, created) VALUES(?1, ?2)", -1, &stmt,
+							   NULL) == SQLITE_OK) {
+			sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT);
+			sqlite3_bind_int64(stmt, 2, (sqlite3_int64)time(NULL));
+			if (sqlite3_step(stmt) == SQLITE_DONE) {
+				id = (int)sqlite3_last_insert_rowid(db);
+			}
+			sqlite3_finalize(stmt);
+		}
+	}
+	if (id > 0) {
+		bump_generation(GEN_COLLECTIONS);
+	}
+	pthread_mutex_unlock(&db_lock);
+	return id;
+}
+
+bool library_collection_exists(const char *name, int *id_out) {
+	if (id_out) {
+		*id_out = 0;
+	}
+	if (!name || !name[0]) {
+		return false;
+	}
+
+	pthread_mutex_lock(&db_lock);
+	int id = db ? collection_id_named_locked(name) : 0;
+	pthread_mutex_unlock(&db_lock);
+
+	if (id <= 0) {
+		return false;
+	}
+	if (id_out) {
+		*id_out = id;
+	}
+	return true;
+}
+
+bool library_collection_rename(int id, const char *name) {
+	if (id <= 0 || !name || !name[0]) {
+		return false;
+	}
+
+	pthread_mutex_lock(&db_lock);
+	bool ok = false;
+	if (db && collection_exists_locked(id)) {
+		// A name owned by another collection is refused here as well as by the
+		// UNIQUE constraint, so the caller gets an answer rather than an
+		// sqlite error. Renaming to the current name is a no-op that succeeds.
+		int owner = collection_id_named_locked(name);
+		if (owner == 0 || owner == id) {
+			sqlite3_stmt *stmt = NULL;
+			if (sqlite3_prepare_v2(db, "UPDATE SONIX_COLLECTION SET name=?2 WHERE id=?1", -1, &stmt, NULL) ==
+				SQLITE_OK) {
+				sqlite3_bind_int(stmt, 1, id);
+				sqlite3_bind_text(stmt, 2, name, -1, SQLITE_TRANSIENT);
+				ok = sqlite3_step(stmt) == SQLITE_DONE;
+				sqlite3_finalize(stmt);
+			}
+		}
+	}
+	if (ok) {
+		bump_generation(GEN_COLLECTIONS);
+	}
+	pthread_mutex_unlock(&db_lock);
+	return ok;
+}
+
+bool library_collection_delete(int id) {
+	if (id <= 0) {
+		return false;
+	}
+
+	pthread_mutex_lock(&db_lock);
+	bool ok = false;
+	if (db && exec("SAVEPOINT collection_delete")) {
+		int items = 0, rows = 0;
+		ok = collection_exec_id("DELETE FROM SONIX_COLLECTION_ITEM WHERE collection=?1", id, &items) &&
+			 collection_exec_id("DELETE FROM SONIX_COLLECTION WHERE id=?1", id, &rows);
+		if (ok) {
+			ok = exec("RELEASE collection_delete");
+		}
+		if (!ok) {
+			exec("ROLLBACK TO collection_delete");
+			exec("RELEASE collection_delete");
+		}
+	}
+	if (ok) {
+		bump_generation(GEN_COLLECTIONS);
+	}
+	pthread_mutex_unlock(&db_lock);
+	return ok;
+}
+
+int library_collection_list(library_collection_cb cb, void *user) {
+	if (!cb) {
+		return 0;
+	}
+
+	int count = 0;
+	pthread_mutex_lock(&db_lock);
+	sqlite3_stmt *stmt = NULL;
+	if (db && sqlite3_prepare_v2(db,
+								 "SELECT c.id, c.name,"
+								 " (SELECT COUNT(*) FROM SONIX_COLLECTION_ITEM i WHERE i.collection=c.id)"
+								 " FROM SONIX_COLLECTION c ORDER BY c.name COLLATE listorder",
+								 -1, &stmt, NULL) == SQLITE_OK) {
+		while (sqlite3_step(stmt) == SQLITE_ROW) {
+			int id = sqlite3_column_int(stmt, 0);
+			const char *name = (const char *)sqlite3_column_text(stmt, 1);
+			int albums = sqlite3_column_int(stmt, 2);
+			count++;
+			// The callback runs with the index locked: it copies what it
+			// needs and does not ask the library anything.
+			if (!cb(id, name ? name : "", albums, user)) {
+				break;
+			}
+		}
+		sqlite3_finalize(stmt);
+	}
+	pthread_mutex_unlock(&db_lock);
+	return count;
+}
+
+int library_collection_count(int id) {
+	if (id <= 0) {
+		return 0;
+	}
+
+	int count = 0;
+	pthread_mutex_lock(&db_lock);
+	sqlite3_stmt *stmt = NULL;
+	if (db && sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM SONIX_COLLECTION_ITEM WHERE collection=?1", -1, &stmt,
+								 NULL) == SQLITE_OK) {
+		sqlite3_bind_int(stmt, 1, id);
+		if (sqlite3_step(stmt) == SQLITE_ROW) {
+			count = sqlite3_column_int(stmt, 0);
+		}
+		sqlite3_finalize(stmt);
+	}
+	pthread_mutex_unlock(&db_lock);
+	return count;
+}
+
+int library_collection_page(int id, int offset, int count, library_collection_item_t *out) {
+	if (id <= 0 || !out || offset < 0 || count <= 0) {
+		return 0;
+	}
+
+	int got = 0;
+	pthread_mutex_lock(&db_lock);
+	sqlite3_stmt *stmt = NULL;
+	if (db && sqlite3_prepare_v2(db,
+								 "SELECT idx, album, album_key, artist, folder, first_path"
+								 " FROM SONIX_COLLECTION_ITEM WHERE collection=?1 ORDER BY idx LIMIT ?2 OFFSET ?3",
+								 -1, &stmt, NULL) == SQLITE_OK) {
+		sqlite3_bind_int(stmt, 1, id);
+		sqlite3_bind_int(stmt, 2, count);
+		sqlite3_bind_int(stmt, 3, offset);
+		while (got < count && sqlite3_step(stmt) == SQLITE_ROW) {
+			collection_item_read(stmt, &out[got]);
+			got++;
+		}
+		sqlite3_finalize(stmt);
+	}
+	// The lock goes back before the caller resolves these rows: resolving
+	// asks this same library for album snapshots.
+	pthread_mutex_unlock(&db_lock);
+	return got;
+}
+
+int library_collection_remove(int id, const int *positions, int count) {
+	if (id <= 0 || !positions || count <= 0) {
+		return 0;
+	}
+
+	int removed = 0;
+	pthread_mutex_lock(&db_lock);
+	if (db && exec("SAVEPOINT collection_remove")) {
+		bool ok = true;
+		sqlite3_stmt *stmt = NULL;
+		if (sqlite3_prepare_v2(db, "DELETE FROM SONIX_COLLECTION_ITEM WHERE collection=?1 AND idx=?2", -1, &stmt,
+							   NULL) != SQLITE_OK) {
+			ok = false;
+		} else {
+			for (int i = 0; i < count && ok; i++) {
+				if (positions[i] < 0) {
+					continue;
+				}
+				sqlite3_bind_int(stmt, 1, id);
+				sqlite3_bind_int(stmt, 2, positions[i]);
+				ok = sqlite3_step(stmt) == SQLITE_DONE;
+				if (ok && sqlite3_changes(db) > 0) {
+					removed++;
+				}
+				sqlite3_reset(stmt);
+			}
+			sqlite3_finalize(stmt);
+		}
+		if (ok) {
+			ok = exec("RELEASE collection_remove");
+		}
+		if (!ok) {
+			exec("ROLLBACK TO collection_remove");
+			exec("RELEASE collection_remove");
+			removed = 0;
+		}
+	}
+	if (removed > 0) {
+		bump_generation(GEN_COLLECTIONS);
+	}
+	pthread_mutex_unlock(&db_lock);
+	return removed;
+}
+
+// ---------------------------------------------------------------------------
+// Adding a collection's albums a row at a time
+// ---------------------------------------------------------------------------
+
+struct library_collection_writer {
+	sqlite3_stmt *stmt;
+	int collection;
+	int next_idx;
+	int added;
+	int skipped;
+	bool failed;
+};
+
+library_collection_writer_t *library_collection_write_begin(int id) {
+	if (id <= 0) {
+		return NULL;
+	}
+	library_collection_writer_t *writer = calloc(1, sizeof(*writer));
+	if (!writer) {
+		return NULL;
+	}
+	writer->collection = id;
+	writer->next_idx = 0;
+
+	pthread_mutex_lock(&db_lock);
+	bool ok = false;
+	bool saved = false;
+	if (db && collection_exists_locked(id)) {
+		sqlite3_stmt *stmt = NULL;
+		// Once, not per row: the writer appends, and only the rows that go in
+		// take a position.
+		if (sqlite3_prepare_v2(db,
+							   "SELECT COALESCE(MAX(idx), -1) + 1 FROM SONIX_COLLECTION_ITEM WHERE collection=?1",
+							   -1, &stmt, NULL) == SQLITE_OK) {
+			sqlite3_bind_int(stmt, 1, id);
+			if (sqlite3_step(stmt) == SQLITE_ROW) {
+				writer->next_idx = sqlite3_column_int(stmt, 0);
+				ok = true;
+			}
+			sqlite3_finalize(stmt);
+		}
+	}
+	if (ok) {
+		saved = exec("SAVEPOINT " COLLECTION_SAVEPOINT);
+		ok = saved;
+	}
+	if (ok) {
+		ok = sqlite3_prepare_v2(db,
+								"INSERT OR IGNORE INTO SONIX_COLLECTION_ITEM"
+								"(collection, idx, album, album_key, artist, folder, first_path)"
+								" VALUES(?1,?2,?3,?4,?5,?6,?7)",
+								-1, &writer->stmt, NULL) == SQLITE_OK;
+	}
+	if (!ok) {
+		if (writer->stmt) {
+			sqlite3_finalize(writer->stmt);
+		}
+		if (saved) {
+			exec("ROLLBACK TO " COLLECTION_SAVEPOINT);
+			exec("RELEASE " COLLECTION_SAVEPOINT);
+		}
+	}
+	pthread_mutex_unlock(&db_lock);
+
+	if (!ok) {
+		free(writer);
+		return NULL;
+	}
+	return writer;
+}
+
+bool library_collection_write_row(library_collection_writer_t *writer, const library_collection_item_t *item) {
+	if (!writer || !item || writer->failed) {
+		return false;
+	}
+
+	pthread_mutex_lock(&db_lock);
+	sqlite3_reset(writer->stmt);
+	sqlite3_bind_int(writer->stmt, 1, writer->collection);
+	sqlite3_bind_int(writer->stmt, 2, writer->next_idx);
+	sqlite3_bind_text(writer->stmt, 3, item->album, -1, SQLITE_TRANSIENT);
+	sqlite3_bind_text(writer->stmt, 4, item->album_key, -1, SQLITE_TRANSIENT);
+	sqlite3_bind_text(writer->stmt, 5, item->artist, -1, SQLITE_TRANSIENT);
+	sqlite3_bind_text(writer->stmt, 6, item->folder, -1, SQLITE_TRANSIENT);
+	sqlite3_bind_text(writer->stmt, 7, item->first_path, -1, SQLITE_TRANSIENT);
+	bool ok = sqlite3_step(writer->stmt) == SQLITE_DONE;
+	// INSERT OR IGNORE: a row the unique key already holds changed nothing.
+	// Nothing goes in, the position is not used, and the next album keeps it.
+	bool added = ok && sqlite3_changes(db) > 0;
+	pthread_mutex_unlock(&db_lock);
+
+	if (!ok) {
+		writer->failed = true;
+		return false;
+	}
+	if (added) {
+		writer->next_idx++;
+		writer->added++;
+	} else {
+		writer->skipped++;
+	}
+	return added;
+}
+
+bool library_collection_write_end(library_collection_writer_t *writer, bool keep, int *added, int *skipped) {
+	if (added) {
+		*added = 0;
+	}
+	if (skipped) {
+		*skipped = 0;
+	}
+	if (!writer) {
+		return false;
+	}
+
+	pthread_mutex_lock(&db_lock);
+	sqlite3_finalize(writer->stmt);
+	bool ok = keep && !writer->failed;
+	if (ok) {
+		ok = exec("RELEASE " COLLECTION_SAVEPOINT);
+	}
+	if (!ok) {
+		// A release that failed (or a write that did) leaves the savepoint
+		// standing; wind it back and let go of it before the writer is freed.
+		exec("ROLLBACK TO " COLLECTION_SAVEPOINT);
+		exec("RELEASE " COLLECTION_SAVEPOINT);
+	}
+	if (ok) {
+		// Every added row is committed and stays; the duplicates were not
+		// written at all.
+		if (added) {
+			*added = writer->added;
+		}
+		if (skipped) {
+			*skipped = writer->skipped;
+		}
+		bump_generation(GEN_COLLECTIONS);
+	} else if (skipped) {
+		*skipped = writer->skipped;
+	}
+	pthread_mutex_unlock(&db_lock);
+	free(writer);
+	return ok;
+}
+
+// ---------------------------------------------------------------------------
+// Self-heal
+// ---------------------------------------------------------------------------
+
+library_collection_update_result_t library_collection_update_item(int id, int position,
+																  const library_collection_item_t *item) {
+	if (id <= 0 || position < 0 || !item) {
+		return LIBRARY_COLLECTION_ITEM_FAILED;
+	}
+
+	library_collection_update_result_t result = LIBRARY_COLLECTION_ITEM_FAILED;
+	pthread_mutex_lock(&db_lock);
+	if (db && exec("SAVEPOINT collection_update")) {
+		// Another position already resolved to this album: the earlier
+		// position wins, so this row is deleted rather than duplicated. The
+		// unique key would refuse the update anyway; this is the honest answer
+		// and the collection's count gets one smaller.
+		sqlite3_stmt *stmt = NULL;
+		bool held = false;
+		if (sqlite3_prepare_v2(db,
+							   "SELECT 1 FROM SONIX_COLLECTION_ITEM"
+							   " WHERE collection=?1 AND album=?2 AND album_key=?3 AND idx<>?4 LIMIT 1",
+							   -1, &stmt, NULL) == SQLITE_OK) {
+			sqlite3_bind_int(stmt, 1, id);
+			sqlite3_bind_text(stmt, 2, item->album, -1, SQLITE_TRANSIENT);
+			sqlite3_bind_text(stmt, 3, item->album_key, -1, SQLITE_TRANSIENT);
+			sqlite3_bind_int(stmt, 4, position);
+			held = sqlite3_step(stmt) == SQLITE_ROW;
+			sqlite3_finalize(stmt);
+		}
+
+		bool ok = false;
+		if (held) {
+			if (sqlite3_prepare_v2(db, "DELETE FROM SONIX_COLLECTION_ITEM WHERE collection=?1 AND idx=?2", -1,
+								   &stmt, NULL) == SQLITE_OK) {
+				sqlite3_bind_int(stmt, 1, id);
+				sqlite3_bind_int(stmt, 2, position);
+				ok = sqlite3_step(stmt) == SQLITE_DONE;
+				sqlite3_finalize(stmt);
+			}
+			if (ok) {
+				result = LIBRARY_COLLECTION_ITEM_MERGED;
+			}
+		} else {
+			if (sqlite3_prepare_v2(db,
+								   "UPDATE SONIX_COLLECTION_ITEM"
+								   " SET album=?3, album_key=?4, artist=?5, folder=?6, first_path=?7"
+								   " WHERE collection=?1 AND idx=?2",
+								   -1, &stmt, NULL) == SQLITE_OK) {
+				sqlite3_bind_int(stmt, 1, id);
+				sqlite3_bind_int(stmt, 2, position);
+				sqlite3_bind_text(stmt, 3, item->album, -1, SQLITE_TRANSIENT);
+				sqlite3_bind_text(stmt, 4, item->album_key, -1, SQLITE_TRANSIENT);
+				sqlite3_bind_text(stmt, 5, item->artist, -1, SQLITE_TRANSIENT);
+				sqlite3_bind_text(stmt, 6, item->folder, -1, SQLITE_TRANSIENT);
+				sqlite3_bind_text(stmt, 7, item->first_path, -1, SQLITE_TRANSIENT);
+				ok = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0;
+				sqlite3_finalize(stmt);
+			}
+			if (ok) {
+				result = LIBRARY_COLLECTION_ITEM_UPDATED;
+			}
+		}
+
+		if (result != LIBRARY_COLLECTION_ITEM_FAILED) {
+			result = exec("RELEASE collection_update") ? result : LIBRARY_COLLECTION_ITEM_FAILED;
+		}
+		if (result == LIBRARY_COLLECTION_ITEM_FAILED) {
+			exec("ROLLBACK TO collection_update");
+			exec("RELEASE collection_update");
+		}
+	}
+	if (result != LIBRARY_COLLECTION_ITEM_FAILED) {
+		bump_generation(GEN_COLLECTIONS);
+	}
+	pthread_mutex_unlock(&db_lock);
+	return result;
+}
+
+unsigned library_collections_revision(void) {
+	pthread_mutex_lock(&db_lock);
+	unsigned value = generation[GEN_COLLECTIONS];
+	pthread_mutex_unlock(&db_lock);
+	return value;
 }

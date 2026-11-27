@@ -235,6 +235,22 @@ all: host compile_commands.json
 
 host: $(HOST_BIN) compile_commands.json
 
+TEST_COLLECTIONS_BIN = build_host/collections_resolve_test
+
+TEST_COLLECTIONS_SRCS = tests/collections_resolve_test.c src/system/library/collections_resolve.c
+TEST_COLLECTIONS_HDRS = src/system/library/collections_resolve.h src/system/library/library.h
+
+# Headers are normal prerequisites so a header-only change rebuilds the test;
+# pass the sources explicitly rather than $^ so the headers are not compiled.
+$(TEST_COLLECTIONS_BIN): $(TEST_COLLECTIONS_SRCS) $(TEST_COLLECTIONS_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(HOST_CFLAGS) -o $@ $(TEST_COLLECTIONS_SRCS)
+
+test-collections: $(TEST_COLLECTIONS_BIN)
+	./$(TEST_COLLECTIONS_BIN)
+
+.PHONY: test-collections
+
 $(HOST_BIN): $(HOST_OBJS)
 	$(HOST_LD) -o $@ $(HOST_OBJS) $(HOST_LDFLAGS)
 	@echo "Host build complete: Run './$(HOST_BIN)' to start the simulator."

@@ -237,6 +237,7 @@ extern const lv_image_dsc_t icon_menu_favourites;
 extern const lv_image_dsc_t icon_menu_most_played;
 extern const lv_image_dsc_t icon_menu_explorer;
 extern const lv_image_dsc_t icon_menu_playlist;
+extern const lv_image_dsc_t icon_menu_collection;
 extern const lv_image_dsc_t icon_menu_streaming;
 extern const lv_image_dsc_t icon_menu_wireless;
 extern const lv_image_dsc_t icon_menu_wifi_settings;

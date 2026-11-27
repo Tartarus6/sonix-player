@@ -664,7 +664,7 @@ void device_state_restore_file(const char *filepath, double position) {
 // does not, and "play albums back to back" stays dead until a record is started
 // by hand.
 static void restore_queue_album(void) {
-	char album[256];
+	char album[LIBRARY_ALBUM_VALUE_MAX];
 	if (library_queue_load_album(album, (int)sizeof(album))) {
 		playlist_set_album(album);
 		char shown[sizeof(album)];
@@ -940,10 +940,10 @@ void device_state_set_folder_chaining(bool on) {
 // the card, which is only known once the walk has run out.
 typedef struct {
 	const char *current;
-	char first[256]; // for the wrap round at the end of the alphabet
-	char last[256];	 // ... and at the start of it
-	char prev[256];
-	char next[256];
+	char first[LIBRARY_ALBUM_VALUE_MAX]; // for the wrap round at the end of the alphabet
+	char last[LIBRARY_ALBUM_VALUE_MAX];	 // ... and at the start of it
+	char prev[LIBRARY_ALBUM_VALUE_MAX];
+	char next[LIBRARY_ALBUM_VALUE_MAX];
 	bool seen_current;
 	bool found_next;
 	bool found_prev;
@@ -1054,16 +1054,16 @@ static bool start_album(const char *wanted, bool forward) {
 static struct {
 	bool on;
 	library_filter_t filter;
-	char value[256];
+	char value[LIBRARY_ALBUM_VALUE_MAX];
 	// The records played, the one playing last.
-	char history[RANDOM_ALBUM_HISTORY][256];
+	char history[RANDOM_ALBUM_HISTORY][LIBRARY_ALBUM_VALUE_MAX];
 	int depth;
 } random_albums;
 
 static bool album_value_cb(const char *name, const char *path, const char *artist, void *user) {
 	(void)path;
 	(void)artist;
-	snprintf(user, 256, "%s", name ? name : "");
+	snprintf(user, LIBRARY_ALBUM_VALUE_MAX, "%s", name ? name : "");
 	return false;
 }
 
@@ -1111,7 +1111,7 @@ static bool random_albums_pick(const char *avoid, char *out, size_t size) {
 		seeded = true;
 	}
 
-	char name[256] = "";
+	char name[LIBRARY_ALBUM_VALUE_MAX] = "";
 	bool found = false;
 	for (int tries = 0; tries < RANDOM_ALBUM_TRIES && !found; tries++) {
 		name[0] = '\0';
@@ -1143,7 +1143,7 @@ bool device_state_play_random_album(library_filter_t filter, const char *value) 
 	random_albums.filter = filter;
 	snprintf(random_albums.value, sizeof(random_albums.value), "%s", value ? value : "");
 
-	char album[256];
+	char album[LIBRARY_ALBUM_VALUE_MAX];
 	if (!random_albums_pick(playlist_album(), album, sizeof(album)) || !start_album(album, true)) {
 		return false;
 	}
@@ -1167,7 +1167,7 @@ static bool random_albums_beside(const char *current, bool forward) {
 		return start_album(random_albums.history[random_albums.depth - 1], false);
 	}
 
-	char album[256];
+	char album[LIBRARY_ALBUM_VALUE_MAX];
 	if (!random_albums_pick(current, album, sizeof(album)) || !start_album(album, forward)) {
 		return false;
 	}
@@ -1265,7 +1265,7 @@ static bool play_folder_beside(const char *file, bool forward) {
 static bool chain_beside(bool forward) {
 	const char *album = playlist_album();
 	if (album && album[0] && device_state_album_chaining()) {
-		char held[256];
+		char held[LIBRARY_ALBUM_VALUE_MAX];
 		snprintf(held, sizeof(held), "%s", album); // the queue is about to be replaced
 		if (random_albums_beside(held, forward) || play_album_beside(held, forward)) {
 			return true;

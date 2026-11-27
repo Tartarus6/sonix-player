@@ -17,6 +17,7 @@
 #include "src/gui/shell/icons.h"
 #include "src/gui/settings/musicsettings.h"
 #include "src/gui/nowplaying/player.h"
+#include "src/gui/library/collectionspage.h"
 #include "src/gui/library/playlistpage.h"
 #include "src/gui/shell/popover.h"
 #include "src/gui/shell/settingsrow.h"
@@ -176,7 +177,7 @@ typedef struct {
 // WINDOW_ROWS of these, so a few kilobytes bought once beats an allocation per
 // row bound.
 typedef struct {
-	char name[256];
+	char name[LIBRARY_ALBUM_VALUE_MAX];
 	char path[512];
 	char artist[128]; // a track's artist, an album's; empty on the other lists
 	bool has_path;
@@ -210,7 +211,7 @@ typedef struct {
 typedef struct {
 	library_list_t kind;
 	library_filter_t filter;
-	char value[256];
+	char value[LIBRARY_ALBUM_VALUE_MAX];
 	char title[160];
 	int scroll;
 	// Replaced from the player's own menu: the step back reopens the player
@@ -268,7 +269,7 @@ typedef struct {
 	// Enough to reload the very same list under a different order, which is
 	// what the corner buttons do.
 	library_filter_t filter;
-	char filter_value[256];
+	char filter_value[LIBRARY_ALBUM_VALUE_MAX];
 	// Inside one album: the artist it is credited to, so a track is only
 	// credited when its own artist is someone else.
 	char album_artist[128];
@@ -929,10 +930,10 @@ static void row_drop_thumb(panel_t *p, row_t *row) {
 // ---------------------------------------------------------------------------
 
 static char np_path[512];
-static char np_album[256];
+static char np_album[LIBRARY_ALBUM_VALUE_MAX];
 // The playing track's record as an Albums row names it -- the name and the key
 // that tells same-named albums apart -- or empty when the file is not indexed.
-static char np_album_value[300];
+static char np_album_value[LIBRARY_ALBUM_VALUE_MAX];
 static char np_artist[256];
 static char np_album_artist[256];
 static char np_genre[128];
@@ -1553,8 +1554,8 @@ static void sel_gather(panel_t *p, path_list_t *list) {
 	selection_stop(p);
 }
 
-static void sel_add_cb(lv_event_t *e) {
-	panel_t *p = lv_event_get_user_data(e);
+static void sel_add_playlist_action(void *user) {
+	panel_t *p = user;
 	if (!p || !p->selecting || p->sel_count == 0) {
 		return;
 	}
@@ -1566,6 +1567,51 @@ static void sel_add_cb(lv_event_t *e) {
 		playlistpage_add_tracks((const char *const *)list.paths, list.count);
 	}
 	path_list_free(&list);
+}
+
+// Albums stay albums here rather than being expanded to their tracks. The
+// picker copies the values synchronously, so this array can be freed as soon
+// as the picker has been opened.
+static void sel_add_collection_action(void *user) {
+	panel_t *p = user;
+	if (!p || !p->selecting || p->sel_count == 0) {
+		return;
+	}
+	qsort(p->sel, (size_t)p->sel_count, sizeof(*p->sel), sel_by_index);
+
+	int count = p->sel_count;
+	char **values = calloc((size_t)count, sizeof(*values));
+	int copied = 0;
+	for (; values && copied < count; copied++) {
+		values[copied] = strdup(p->sel[copied].key);
+		if (!values[copied]) {
+			break;
+		}
+	}
+	if (copied == count) {
+		selection_stop(p);
+		collectionspage_add_albums((const char *const *)values, count);
+	}
+	for (int i = 0; i < copied; i++) {
+		free(values[i]);
+	}
+	free(values);
+}
+
+static void sel_add_cb(lv_event_t *e) {
+	panel_t *p = lv_event_get_user_data(e);
+	if (!p || !p->selecting || p->sel_count == 0) {
+		return;
+	}
+	if (p->kind != LIBRARY_LIST_ALBUMS) {
+		sel_add_playlist_action(p);
+		return;
+	}
+	popover_item_t items[] = {
+		{"add_to_playlist", sel_add_playlist_action, p},
+		{"collection_add_to_collection", sel_add_collection_action, p},
+	};
+	popover_show(p->sel_add_btn, items, 2);
 }
 
 // Each track where "add to queue" puts it, the first chosen first -- see
@@ -2623,7 +2669,7 @@ static void row_clicked_cb(lv_event_t *e) {
 	}
 
 	char path[512];
-	char name[256];
+	char name[LIBRARY_ALBUM_VALUE_MAX];
 	{
 		const char *n = NULL;
 		const char *pth = NULL;
@@ -3543,7 +3589,7 @@ static void menu_details_action(void *user) {
 // The album name is looked up again at the moment it is asked for rather than
 // carried on every row -- one query against a path that is already indexed,
 // against a string per entry in a list that can run to thousands.
-static char menu_album[256];
+static char menu_album[LIBRARY_ALBUM_VALUE_MAX];
 
 static void menu_album_action(void *user) {
 	(void)user;
@@ -4606,7 +4652,7 @@ static void head_show_image(panel_t *p, const cover_image_t *image) {
 static bool head_from_player(panel_t *p, const char *first_path) {
 	device_state_t state;
 	device_state_get(&state);
-	char album[256];
+	char album[LIBRARY_ALBUM_VALUE_MAX];
 	if (!state.current_file[0] || !library_track_album_value(state.current_file, album, sizeof(album)) ||
 		!library_album_same(album, p->filter_value)) {
 		return false;

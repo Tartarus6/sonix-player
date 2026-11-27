@@ -9,6 +9,7 @@
 
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/icons.h"
+#include "src/gui/library/collectionspage.h"
 #include "src/gui/library/medialist.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/library/playlistpage.h"
@@ -1724,6 +1725,20 @@ static void add_to_playlist_cb(void *user) {
 	switcher_set_player_return(playlistpage_screen);
 }
 
+static void add_album_to_collection_cb(void *user) {
+	(void)user;
+	device_state_t state;
+	device_state_get(&state);
+	char album[LIBRARY_ALBUM_VALUE_MAX];
+	if (!state.current_file[0] ||
+		!library_track_album_value(state.current_file, album, sizeof(album)) || !album[0]) {
+		return;
+	}
+	player_sheet_close(false);
+	collectionspage_add_album(album);
+	switcher_set_player_return(collectionspage_screen);
+}
+
 // "Show album": the record the playing track came off. Backing out of it
 // returns to the player, like everything else this menu opens.
 static void open_album_cb(void *user) {
@@ -1791,7 +1806,7 @@ static void open_album_cb(void *user) {
 		return;
 	}
 
-	char album[256];
+	char album[LIBRARY_ALBUM_VALUE_MAX];
 	if (!library_track_album_value(state.current_file, album, sizeof(album)) || !album[0]) {
 		gui_notify_popup("trackmenu_no_album");
 		return;
@@ -1825,16 +1840,17 @@ void trackmenu_details_open(const char *path) {
 }
 
 void trackmenu_open(lv_obj_t *anchor) {
-	// Two tables rather than one with the label patched at runtime, because of
-	// the string-extraction tool: it reads popover_item_t initialisers (see
+	// Static tables rather than one patched at runtime, because of the
+	// string-extraction tool: it reads popover_item_t initialisers (see
 	// LABEL_STRUCTS in tools/extract_strings.py), not assignments. A
 	// "trackmenu_show_podcast" written with an equals sign would never reach the
 	// language files and would stay untranslated everywhere.
 	//
-	// The action behind both is the same: open_album_cb inspects where the
-	// playing file came from and decides for itself. Only the wording differs,
-	// because a podcast episode has no album and calling it one would be a
-	// borrowed term to make a menu line up.
+	// The action behind both album labels is the same: open_album_cb inspects
+	// where the playing file came from and decides for itself. Only the wording
+	// differs, because a podcast episode has no album and calling it one would
+	// be a borrowed term to make a menu line up. A local indexed album also gets
+	// the collection action; podcasts and cached streaming tracks do not.
 	static const popover_item_t ITEMS[] = {
 		{"trackmenu_queue", open_queue_cb, NULL},
 		{"add_to_playlist", add_to_playlist_cb, NULL},
@@ -1849,12 +1865,36 @@ void trackmenu_open(lv_obj_t *anchor) {
 		{"details", open_details_cb, NULL},
 		{"settings", open_settings_cb, NULL},
 	};
+	static const popover_item_t ITEMS_LOCAL[] = {
+		{"trackmenu_queue", open_queue_cb, NULL},
+		{"add_to_playlist", add_to_playlist_cb, NULL},
+		{"collection_add_to_collection", add_album_to_collection_cb, NULL},
+		{"show_album", open_album_cb, NULL},
+		{"details", open_details_cb, NULL},
+		{"settings", open_settings_cb, NULL},
+	};
 
 	device_state_t state;
 	device_state_get(&state);
 	bool podcast = state.current_file[0] && podcastcache_is_episode(state.current_file);
 
-	popover_show(anchor, podcast ? ITEMS_PODCAST : ITEMS, 5);
+	const popover_item_t *items = ITEMS;
+	int count = 5;
+	if (podcast) {
+		items = ITEMS_PODCAST;
+	} else {
+		char service_album[40];
+		bool streaming = state.current_file[0] &&
+						 (qobuzcache_album_id(state.current_file, service_album, sizeof(service_album)) ||
+						  tidalcache_album_id(state.current_file, service_album, sizeof(service_album)));
+		char album[LIBRARY_ALBUM_VALUE_MAX];
+		if (!streaming && state.current_file[0] &&
+			library_track_album_value(state.current_file, album, sizeof(album))) {
+			items = ITEMS_LOCAL;
+			count = 6;
+		}
+	}
+	popover_show(anchor, items, count);
 }
 
 void trackmenu_init(gui_config_t *cfg) {

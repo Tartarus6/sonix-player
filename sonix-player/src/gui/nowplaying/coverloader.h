@@ -26,11 +26,17 @@
 // album carousel takes 84..89; and the cover at the head of an album's tracks
 // takes 90; the podcasts on the card take 91..102 for their twelve rows, 103
 // for the cover at the head of one of them and 104..107 for the episodes being
-// listened to -- so the pools never trample each other's requests.
-#define COVERLOADER_SLOTS 108
+// listened to; and a collection's detail rows take 108..117 -- so the pools
+// never trample each other's requests.
+#define COVERLOADER_SLOTS 118
 #define COVERLOADER_SEARCH_BASE 36
 #define COVERLOADER_SEARCH_COUNT 24
 #define COVERLOADER_AUDIOBOOKS_BASE 60
+
+// The ten rows of a collection's detail page (collectionpage.c): one album
+// each, whatever its position in the window.
+#define COVERLOADER_COLLECTION_BASE 108
+#define COVERLOADER_COLLECTION_COUNT 10
 
 // The album carousel's six places take 84..89 -- five that can be seen and one
 // that is always just off an edge, because the column scrolls through the

@@ -42,6 +42,7 @@
 #include "src/gui/shell/lowbattery.h"
 #include "src/gui/shell/main_menu.h"
 #include "src/gui/library/medialist.h"
+#include "src/gui/library/collectionpage.h"
 #include "src/gui/library/filespage.h"
 #include "src/gui/library/imageview.h"
 #include "src/gui/library/textview.h"
@@ -57,6 +58,7 @@
 #include "src/gui/settings/musicsettings.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/library/playlistpage.h"
+#include "src/gui/library/collectionspage.h"
 #include "src/gui/settings/powersettings.h"
 #include "src/gui/shell/powermenu.h"
 #include "src/gui/shell/quickpanel.h"
@@ -605,6 +607,8 @@ void gui_init(gui_config_t *cfg) {
 	medialist_screen = lv_obj_create(NULL);
 	medialist_tracks_screen = lv_obj_create(NULL);
 	medialist_albums_screen = lv_obj_create(NULL);
+	collectionpage_screen = lv_obj_create(NULL);
+	collectionspage_screen = lv_obj_create(NULL);
 	audiobooks_screen = lv_obj_create(NULL);
 	audiobooksettings_screen = lv_obj_create(NULL);
 	audiobookcontrols_screen = lv_obj_create(NULL);
@@ -723,6 +727,8 @@ void gui_init(gui_config_t *cfg) {
 	search_init(cfg);
 	medialist_init(cfg);
 	playlistpage_init(cfg);
+	collectionpage_init(cfg);
+	collectionspage_init(cfg); // the collections list and picker
 	audiobookextras_init(cfg); // the bookmarks and summary pages
 	audiobooks_init(cfg);
 	chapters_init(cfg);

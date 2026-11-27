@@ -163,11 +163,11 @@ static size_t chain_slot;  // order-index of the last track added
 static bool chain_valid;
 
 // The album this queue is, when it is one. See playlist.h.
-static char queue_album[256];
+static char queue_album[LIBRARY_ALBUM_VALUE_MAX];
 
 // What is on the card, so the write happens when the label moves and not on
 // every queue that is built.
-static char persisted_album[256];
+static char persisted_album[LIBRARY_ALBUM_VALUE_MAX];
 
 // The label goes down with the queue rather than at the next track change. The
 // two do not happen together: the queue is written the moment it is built, and

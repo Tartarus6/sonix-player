@@ -93,7 +93,7 @@ typedef struct {
 	lv_obj_t *subtitle;
 	lv_obj_t *chevron;
 	int index; // the hit bound, -1 for none
-	char name[256]; // a track's title, an album's value, an artist
+	char name[LIBRARY_ALBUM_VALUE_MAX]; // a track's title, an album's value, an artist
 	char path[512]; // a track's file, an album's first track
 	// The artwork, through slot COVERLOADER_SEARCH_BASE + the row's place in
 	// the pool.
@@ -305,7 +305,7 @@ static void track_long_pressed_cb(lv_event_t *e) {
 	}
 
 	snprintf(menu_path, sizeof(menu_path), "%s", row->path);
-	snprintf(menu_name, sizeof(menu_name), "%s", row->name);
+	snprintf(menu_name, sizeof(menu_name), "%.*s", (int)sizeof(menu_name) - 1, row->name);
 	menu_anchor = row->button;
 
 	menu_playlist_count = 0;
@@ -332,7 +332,7 @@ static void run_search(const char *query, bool keep_place);
 
 // One hit, read out of a window of the index.
 typedef struct {
-	char name[256];
+	char name[LIBRARY_ALBUM_VALUE_MAX];
 	char path[512];
 	char artist[256];
 } hit_t;

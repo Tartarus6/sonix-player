@@ -322,6 +322,10 @@ size_t library_track_places(const char *const *paths, size_t count, library_plac
 // saved before albums were told apart still means.
 #define LIBRARY_ALBUM_KEY_SEP '\x1f'
 
+// The longest album value: a 255-byte album name, the separator, a 9-character
+// key and the terminator. Buffers that hold a whole value use this, not 256.
+#define LIBRARY_ALBUM_VALUE_MAX 320
+
 // The part of such a value a person reads: the name, without the key.
 void library_album_title(const char *value, char *out, size_t size);
 
@@ -379,6 +383,34 @@ bool library_album_info(const char *album, library_album_info_t *out);
 // Either array may be NULL. Returns how many tracks there are, which can be
 // more than `max`: only the first `max` are written.
 int library_album_places(const char *album, uint16_t *disc, uint16_t *track, int max);
+
+// A snapshot of one album, by album value. False when it is not in the index.
+//
+// The title, key, artist and first path are the first track's, in the same
+// order the album's track list runs. `folder` is that path's folder, kept so a
+// collection can still show where an album lived after the card moved it.
+typedef struct {
+	char title[256];
+	char key[16];	   // "a1b2c3d4" / "d1b2c3d4", without the separator
+	char artist[256];  // album artist, else first track artist
+	char folder[1024]; // folder of the first track
+	char first_path[1024];
+} library_album_snapshot_t;
+bool library_album_snapshot(const char *album_value, library_album_snapshot_t *out);
+
+// Every album whose name folds to `name`, as a full snapshot. Try the indexed
+// NOCASE match first; scan with foldcase() only when that finds nothing,
+// because the folded comparison has no index. The callback runs with the index
+// locked: copy what you need, do not call back in.
+typedef bool (*library_album_snapshot_cb)(const library_album_snapshot_t *snapshot, void *user);
+int library_album_values_named(const char *name, library_album_snapshot_cb cb, void *user);
+
+// Every album carrying this exact key, as a full snapshot. Normally one.
+int library_album_values_with_key(const char *key, library_album_snapshot_cb cb, void *user);
+
+// The library's folding, exposed so the resolver can compare a snapshot with a
+// candidate the same way album_key() does. Truncates rather than overflows.
+void library_fold_text(const char *in, char *out, size_t size);
 
 // --- Audio quality ---
 //
@@ -572,7 +604,7 @@ typedef struct {
 	library_filter_t filter;
 	library_order_t order;
 	bool desc;
-	char value[256];
+	char value[LIBRARY_ALBUM_VALUE_MAX];
 } library_index_spec_t;
 void library_index_describe(const library_index_t *ix, library_index_spec_t *out);
 
@@ -735,6 +767,63 @@ void library_playlist_count_save(const char *path, long mtime, long size, int tr
 // The caller draws the remembered number either way; this says whether the walk
 // is worth doing again in the background.
 bool library_playlist_count_is_verified(const char *path, long mtime, long size);
+
+// ---------------------------------------------------------------------------
+// Collections
+//
+// A named shelf of whole albums. The collection is a row in SONIX_COLLECTION;
+// each album it holds is a row in SONIX_COLLECTION_ITEM, carrying the album's
+// name and key and a snapshot of where it was when it went in. Nothing here
+// reads MEDIA_TABLE's row ids: an album is the same album after a rescan, by
+// its name and key, not by a number the scan hands out again.
+//
+// `idx` is the item's stable position in the collection. Removals leave holes,
+// which is why a position is not a rank: the page hands back the idx it read.
+// ---------------------------------------------------------------------------
+
+// One item as stored. `idx` is the stable position.
+typedef struct {
+	int idx;
+	char album[256];
+	char album_key[16];
+	char artist[256];
+	char folder[1024];
+	char first_path[1024];
+} library_collection_item_t;
+
+int library_collection_create(const char *name); // id, or -1
+bool library_collection_exists(const char *name, int *id_out);
+bool library_collection_rename(int id, const char *name);
+bool library_collection_delete(int id);
+typedef bool (*library_collection_cb)(int id, const char *name, int albums, void *user);
+int library_collection_list(library_collection_cb cb, void *user);
+int library_collection_count(int id);
+int library_collection_page(int id, int offset, int count, library_collection_item_t *out);
+int library_collection_remove(int id, const int *positions, int count);
+
+// Adding many without holding them all in memory. The writer owns one
+// savepoint; next index is worked out once. `write_row()` answers true when the
+// row went in, false when it was a duplicate or the writer has failed;
+// `write_end()` commits or rolls back and reports the counts and whether the
+// transaction failed.
+typedef struct library_collection_writer library_collection_writer_t;
+library_collection_writer_t *library_collection_write_begin(int id);
+bool library_collection_write_row(library_collection_writer_t *writer, const library_collection_item_t *item);
+bool library_collection_write_end(library_collection_writer_t *writer, bool keep, int *added, int *skipped);
+
+// Used only by the resolver's self-heal, never by the UI directly. Returns
+// UPDATED, MERGED (a later item resolved to an album already held by an
+// earlier position, so this row was deleted) or FAILED.
+typedef enum {
+	LIBRARY_COLLECTION_ITEM_FAILED = 0,
+	LIBRARY_COLLECTION_ITEM_UPDATED,
+	LIBRARY_COLLECTION_ITEM_MERGED,
+} library_collection_update_result_t;
+library_collection_update_result_t library_collection_update_item(int id, int position,
+																  const library_collection_item_t *item);
+
+// Bumped by every write above, so an open page knows to re-read.
+unsigned library_collections_revision(void);
 
 // Playback state for the "remember track" option: one track plus position.
 void library_playback_state_save(const char *path, double position);
