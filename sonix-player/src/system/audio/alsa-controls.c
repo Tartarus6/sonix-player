@@ -13,8 +13,18 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
+
+// V1 jack detection: the raw switch encoding is inverted on that board and a
+// plug takes time to settle. Ported from the TempoTec fork (mr-f0xx, e962720).
+#define JACK_SETTLE_MS 120
+static pthread_mutex_t jack_state_lock = PTHREAD_MUTEX_INITIALIZER;
+static int jack_state_stable = -1;
+static int jack_state_candidate = -1;
+static uint64_t jack_candidate_since_ms;
 
 static long current_volume;
 static int current_percent = 50;
@@ -1218,16 +1228,84 @@ void set_high_gain(int enabled) {
 int get_high_gain(void) { return high_gain; }
 
 
-// Which jack is occupied right now: reads the same switch nodes the output
-// route detection uses. Balanced wins when both report plugged.
-int headphone_jack_state(void) {
-	if (file_matches("/sys/class/switch/balance/state", "1")) {
+#define HEADSET_SWITCH "/sys/class/switch/headset/state"
+#define BALANCE_SWITCH "/sys/class/switch/balance/state"
+
+// A switch node's state as a number, or -1 when it is absent or holds no number.
+static long read_switch_state(const char *path) {
+	FILE *f = fopen(path, "r");
+	if (!f) {
+		return -1;
+	}
+	char line[32];
+	long value = -1;
+	if (fgets(line, sizeof(line), f)) {
+		char *end = NULL;
+		long parsed = strtol(line, &end, 10);
+		if (end != line) {
+			value = parsed;
+		}
+	}
+	fclose(f);
+	return value;
+}
+
+// Raw hardware reading. Balanced wins when its node reports plugged. On the V1
+// the headset node reads 1 with the socket EMPTY (measured by the fork's
+// authors, who also observed 1 both in and out), so 1 means "no jack" and any
+// other value means the 3.5 mm plug. Every change is logged so the encoding can
+// be confirmed on real hardware. HiBy boards keep the original rule.
+static int headphone_jack_state_raw(void) {
+	if (file_matches(BALANCE_SWITCH, "1")) {
 		return JACK_BALANCED;
 	}
-	if (file_matches("/sys/class/switch/headset/state", "1")) {
+
+	const sysinfo_model_t *model = sysinfo_model();
+	if (model && model->headset_switch_idle_one) {
+		static long last_logged = -2;
+		long state = read_switch_state(HEADSET_SWITCH);
+		if (state != last_logged) {
+			fprintf(stderr, "alsa: headset switch reads %ld (1 is the empty socket on this board)\n", state);
+			last_logged = state;
+		}
+		return state < 0 || state == 1 ? JACK_NONE : JACK_HEADSET;
+	}
+
+	if (file_matches(HEADSET_SWITCH, "1")) {
 		return JACK_HEADSET;
 	}
 	return JACK_NONE;
+}
+
+// Which jack is occupied: the raw reading accepted only after it has held
+// steady for JACK_SETTLE_MS. The first reading is used immediately so a plug
+// present at boot is shown without a delay (source: TempoTec fork).
+int headphone_jack_state(void) {
+	int raw = headphone_jack_state_raw();
+	struct timespec now;
+	bool have_time = clock_gettime(CLOCK_MONOTONIC, &now) == 0;
+	uint64_t now_ms = have_time ? (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u : 0;
+
+	pthread_mutex_lock(&jack_state_lock);
+	if (!have_time) {
+		jack_state_stable = raw;
+		jack_state_candidate = raw;
+	} else if (jack_state_stable < 0) {
+		jack_state_stable = raw;
+		jack_state_candidate = raw;
+		jack_candidate_since_ms = now_ms;
+	} else if (raw == jack_state_stable) {
+		jack_state_candidate = raw;
+		jack_candidate_since_ms = now_ms;
+	} else if (raw != jack_state_candidate) {
+		jack_state_candidate = raw;
+		jack_candidate_since_ms = now_ms;
+	} else if (now_ms >= jack_candidate_since_ms && now_ms - jack_candidate_since_ms >= JACK_SETTLE_MS) {
+		jack_state_stable = jack_state_candidate;
+	}
+	int settled = jack_state_stable;
+	pthread_mutex_unlock(&jack_state_lock);
+	return settled < 0 ? JACK_NONE : settled;
 }
 
 // Raw attenuation delta, clamped to the 0-255 register range.

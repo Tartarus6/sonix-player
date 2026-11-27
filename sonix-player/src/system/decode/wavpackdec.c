@@ -12,6 +12,7 @@ struct wavpackdec {
 	int sample_rate;
 	int bits;
 	bool is_float;
+	bool is_dsd;
 	uint64_t frames;
 
 	// Only the 16-bit read needs this: WavpackUnpackSamples writes int32 and
@@ -27,8 +28,9 @@ struct wavpackdec {
 
 // OPEN_WVC: opens a .wvc correction file sitting next to the .wv on its own, so
 //           a hybrid file is lossless again without anyone asking.
-// OPEN_DSD_AS_PCM: a .wv holding DSD is decimated to 24 bit instead of coming
-//           out as a bitstream, which is the only form this path can play.
+// OPEN_DSD_NATIVE: a .wv holding DSD comes out as its bitstream, one byte per
+//           sample, so dsd.c can carry it to the DAC as DoP. Without the flag
+//           libwavpack decimates it to 24 bit PCM, which underruns the card.
 // OPEN_NORMALIZE: applies to floating-point files only, bringing them to
 //           +/-1.0 so the integer conversion below is a multiply and nothing
 //           more.
@@ -40,7 +42,7 @@ struct wavpackdec {
 // reasoning in terms of the file's channel count while writing fewer, and the
 // buffer size the caller has to pass stops being obvious. Taking the channels
 // the file has is simpler.
-#define OPEN_FLAGS (OPEN_WVC | OPEN_DSD_AS_PCM | OPEN_NORMALIZE)
+#define OPEN_FLAGS (OPEN_WVC | OPEN_DSD_NATIVE | OPEN_NORMALIZE)
 
 wavpackdec_t *wavpackdec_open(const char *filepath) {
 	char err[80];
@@ -71,6 +73,7 @@ wavpackdec_t *wavpackdec_open(const char *filepath) {
 	w->channels = channels;
 	w->sample_rate = rate;
 	w->is_float = (WavpackGetMode(wpc) & MODE_FLOAT) != 0;
+	w->is_dsd = (WavpackGetQualifyMode(wpc) & QMODE_DSD_AUDIO) != 0;
 	// A floating-point file has no integer depth; 24 bit is what it is
 	// converted to and what gets reported.
 	w->bits = w->is_float ? 24 : bits;
@@ -207,4 +210,36 @@ bool wavpackdec_seek(wavpackdec_t *w, uint64_t frame) {
 		return false;
 	}
 	return WavpackSeekSample64(w->wpc, (int64_t)frame) != 0;
+}
+
+// ---------------------------------------------------------------------------
+// DSD
+// ---------------------------------------------------------------------------
+
+bool wavpackdec_is_dsd(const wavpackdec_t *w) { return w && w->is_dsd; }
+
+uint32_t wavpackdec_dsd_rate(const wavpackdec_t *w) {
+	return w && w->is_dsd ? WavpackGetNativeSampleRate(w->wpc) : 0;
+}
+
+uint64_t wavpackdec_read_dsd(wavpackdec_t *w, uint64_t frames, unsigned char *out) {
+	if (!w || !w->is_dsd || !out || frames == 0) {
+		return 0;
+	}
+	if (!ensure_scratch(w, frames)) {
+		return 0;
+	}
+	// In native mode each WavPack sample is one byte of DSD, low eight bits
+	// of the int32. The library returns DSD MSB first regardless of the bit
+	// order of the source container, so the byte is ready for DoP as it is.
+	uint32_t got = WavpackUnpackSamples(w->wpc, w->scratch, (uint32_t)frames);
+	uint64_t count = (uint64_t)got * (uint64_t)w->channels;
+	for (uint64_t i = 0; i < count; i++) {
+		out[i] = (unsigned char)w->scratch[i];
+	}
+	return got;
+}
+
+bool wavpackdec_seek_dsd(wavpackdec_t *w, uint64_t byte) {
+	return wavpackdec_seek(w, byte);
 }

@@ -210,6 +210,11 @@ void dbus_w_variant_u32(dbus_writer_t *w, uint32_t value) {
 	dbus_w_u32(w, value);
 }
 
+void dbus_w_variant_i64(dbus_writer_t *w, int64_t value) {
+	w_signature(w, "x");
+	dbus_w_i64(w, value);
+}
+
 // ---------------------------------------------------------------------------
 // The reader
 // ---------------------------------------------------------------------------

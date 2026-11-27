@@ -1,0 +1,59 @@
+{
+  "image": "sonix-packer/r1_original.upt",
+  "expect_device": "r1",
+  "checks": {
+    "file_exists": {
+      "status": "PASS",
+      "evidence": "44255232 bytes"
+    },
+    "iso_magic": {
+      "status": "PASS",
+      "evidence": "CD001 at 0x8001"
+    },
+    "iso_readable": {
+      "status": "PASS",
+      "evidence": "91 ISO members"
+    },
+    "required_metadata": {
+      "status": "PASS",
+      "evidence": "ota_config.in, ota_v0/ota_update.in, ota_v0/ota_compatibility.in, ota_v0/ota_v0.ok"
+    },
+    "ota_components": {
+      "status": "PASS",
+      "evidence": "kernel and rootfs declared"
+    },
+    "compatibility_present": {
+      "status": "PASS",
+      "evidence": "'hiby_r1_x1600_auto_rf_auto'"
+    },
+    "kernel_integrity": {
+      "status": "PASS",
+      "evidence": "8 chunks, size 3731520, md5 c446c0a3b770674ea13bf8e42f63be7e, chain and manifest verified"
+    },
+    "rootfs_integrity": {
+      "status": "PASS",
+      "evidence": "77 chunks, size 40103936, md5 f50a0ca01ddf12d789668261c1af2f77, chain and manifest verified"
+    },
+    "device_identity": {
+      "status": "FAIL",
+      "evidence": "system-info.json device-name not readable from rootfs"
+    }
+  },
+  "observed_device": null,
+  "compatibility": "hiby_r1_x1600_auto_rf_auto",
+  "components": [
+    {
+      "name": "kernel",
+      "size": 3731520,
+      "md5": "c446c0a3b770674ea13bf8e42f63be7e",
+      "chunks": 8
+    },
+    {
+      "name": "rootfs",
+      "size": 40103936,
+      "md5": "f50a0ca01ddf12d789668261c1af2f77",
+      "chunks": 77
+    }
+  ],
+  "result": "REJECTED"
+}

@@ -1,0 +1,987 @@
+#!/bin/bash
+# PROVENANCE: imported from mr-f0xx/sonix-player-tempotec-v1 at commit
+# e96272022f53864f9ed87f615b59c922f201c060 (local snapshot
+# /tmp/sonix-investigation/v1-fork/sonix-packer/sonix_firmware_packer.sh).
+# Device-scoped copy for the TempoTec V1 only. The only change is the optional
+# wake-patch tool lookup, adjusted for the device-scoped import path. The HiBy
+# packer in ../sonix_firmware_packer.sh is unchanged. See
+# docs/audit/PACKER_PROVENANCE.md.
+#
+# Builds a TempoTec Variations V1 firmware image that boots Sonix Player
+# instead of the stock music player.
+#
+# Everything it needs sits next to it:
+#
+#   sonix_firmware_packer.sh   this script
+#   v1_original.upt            the stock firmware of the TempoTec V1
+#   v1_md5_original.txt        TempoTec's checksum file for it (optional)
+#   sonix_player               the binary to install
+#   sonix_launch               waits for the player and reboots when it exits
+#                              (optional: without it the launcher's shell does)
+#   assets/
+#       V1/                    the overlay, applied onto the stock rootfs
+#       |
+#       v
+#   v1.upt                     community firmware; see README before flashing
+#   v1_md5.txt                 its checksum, in TempoTec's own wording
+#
+# The stock update is the frame and only its rootfs is replaced. The kernel
+# chunks and their MD5 chain, ota_config.in, the ota_v0.ok marker and -- from
+# the V1 1.3 stock update on -- ota_v0/ota_compatibility.in go back exactly as
+# TempoTec shipped them, and ota_update.in keeps the stock layout with only the
+# rootfs size and MD5 rewritten. The kernel is never rebuilt or swapped: the
+# 1.3 kernel knows an SPI NAND chip (Zbit ZB35Q01CYIG) the 1.2 kernel does not,
+# so an image for a unit that came with 1.3 has to carry the 1.3 kernel.
+#
+# One player, one image. This fork of Sonix Player targets the TempoTec
+# Variations V1 and nothing else: the HiBy R1 and R3 Pro II builds the
+# upstream project carries are not part of this tree, and there is no board
+# switch left to select them.
+#
+# assets/V1/ is the complete overlay. It carries the model-independent Sonix
+# resource and web trees, the V1's own system-info.json, the boot screens and
+# its fonts. It leaves the stock audio and boot drivers in place, patches the
+# stock touch module's spurious wake report in place, and replaces S80_bt_init
+# with a no-op: Sonix owns Bluetooth startup itself and the stock background
+# script would race it. The TempoTec V1 update remains a small overlay on a
+# real TempoTec image rather than another player's rootfs.
+#
+# No questions asked: run it and it does the lot.
+#
+# One opt-in: SONIX_EMBED_STOCK_KEYS=1 pulls the Qobuz application credentials
+# out of the stock hiby_player while it is still unpacked, and ships them so
+# Qobuz works without a streaming-keys.ini on the card. It is off by default:
+# those are HiBy's credentials, not this project's, and an image built with it
+# must not be redistributed. See docs/qobuz-stock-firmware.md.
+
+set -euo pipefail
+export COLUMNS=1
+
+# --- terminal colours ---
+RED='\033[1;31m'
+GREEN='\033[1;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# Homebrew, for macOS.
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+say()  { echo -e "$@"; }
+step() { echo -e "${BLUE}==>${NC} $*"; }
+warn() { echo -e "${YELLOW}!!${NC}  $*"; }
+die()  { echo -e "${RED}Error:${NC} $*" >&2; exit 1; }
+
+# ==========================================================================
+# Where everything lives
+# ==========================================================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+
+PLAYER_BIN="$SCRIPT_DIR/sonix_player"
+LAUNCH_BIN="$SCRIPT_DIR/sonix_launch"
+
+# The one model this fork builds. The device-name is not decoration -- it is
+# checked against the file the overlay actually landed. That stops an image
+# from offering an update file for a player this one cannot become.
+MODEL_NAME="TempoTec V1"
+MODEL_DIR="V1"
+SOURCE_UPT="$SCRIPT_DIR/v1_original.upt"
+OUTPUT_UPT="$SCRIPT_DIR/v1.upt"
+ASSETS_DIR="$SCRIPT_DIR/assets"
+MODEL_ASSETS="$ASSETS_DIR/$MODEL_DIR"
+
+WORK_DIR="$SCRIPT_DIR/temp"
+OTA_DIR="$WORK_DIR/ota_v0"
+SQUASH_DIR="$SCRIPT_DIR/squashfs-root"
+MERGED_SQUASHFS="$SCRIPT_DIR/rootfs_original.squashfs"
+
+# Paths inside the rootfs.
+STOCK_PLAYER="usr/bin/hiby_player"
+STOCK_LAUNCHER="usr/bin/hiby_player.sh"
+NEW_LAUNCHER="usr/bin/sonix_player.sh"
+INIT_SCRIPT="etc/init.d/S92_03_start_music_player"
+SYSTEM_INFO="usr/resource/sonix/components/system-info.json"
+
+# The stock interface's own resources. Nothing on the device reads them once
+# the player is replaced, and they are several megabytes of an image that has
+# to fit in flash.
+#
+# Note what is NOT in this list: usr/resource/sonix, which is where the assets
+# folder lands. The stock fonts and strings live one level above it and go;
+# ours stay.
+STOCK_UI_DIRS=(usr/resource/litegui usr/resource/layout usr/resource/str usr/resource/fonts)
+
+# The working folders always go, whether the run succeeded or not.
+cleanup() { rm -rf "$WORK_DIR" "$SQUASH_DIR" "$MERGED_SQUASHFS" 2>/dev/null || true; }
+trap cleanup EXIT
+
+say "${BLUE}###############################################${NC}"
+say "${BLUE}###   SONIX PLAYER -- FIRMWARE PACKER       ###${NC}"
+say "${BLUE}###############################################${NC}"
+say ""
+
+# ==========================================================================
+# Portability: md5, file size, build stamp
+# ==========================================================================
+if command -v md5sum >/dev/null 2>&1; then
+	get_md5() { md5sum "$1" | awk '{print $1}'; }
+else
+	get_md5() { md5 -q "$1"; }
+fi
+
+if stat -c%s . >/dev/null 2>&1; then
+	get_size()  { stat -c%s "$1"; }
+	# When the file was last written, as DDMMYYYYHHMM. GNU date takes the file
+	# itself here; the BSD one takes seconds, which is why this is not one line
+	# for both.
+	get_stamp() { date -r "$1" +%d%m%Y%H%M; }
+else
+	get_size()  { stat -f%z "$1"; }
+	get_stamp() { stat -f%Sm -t %d%m%Y%H%M "$1"; }
+fi
+
+# sed -i is spelled differently on the two systems, so nothing here uses it:
+# the file is rewritten through a temporary and moved into place.
+sed_file() {
+	local expression="$1" file="$2"
+	sed -E "$expression" "$file" > "$file.packer.tmp"
+	mv "$file.packer.tmp" "$file"
+}
+
+# How many times a string appears in a file -- every occurrence, not the lines
+# that hold one. A single line can kill both hiby_player.sh and hiby_player,
+# and counting lines would report that as one.
+count_in() { tr -c '[:alnum:]_./' '\n' < "$2" | grep -c -- "$1" || true; }
+
+# Replaces every hiby_player with sonix_player, and proves it: the count before,
+# every resulting line printed, and a hard stop if anything survived.
+#
+# One substitution covers both spellings -- a reference to `hiby_player` becomes
+# `sonix_player`, and one to `hiby_player.sh` becomes `sonix_player.sh`, which
+# is the name the launcher has just been given.
+rename_player_in() {
+	local file="$1" label="$2"
+	local before
+	before="$(count_in "hiby_player" "$file")"
+
+	sed_file "s/hiby_player/sonix_player/g" "$file"
+
+	if grep -q "hiby_player" "$file"; then
+		die "$label still mentions hiby_player after the rewrite."
+	fi
+	say "    $label: $before occurrence(s) of hiby_player replaced"
+	grep -n "sonix_player" "$file" | sed 's/^/        /'
+}
+
+# ==========================================================================
+# What has to be there before anything is touched
+# ==========================================================================
+step "Checking what is needed"
+
+# A string and not an array: bash 3.2, which is the one macOS ships, treats
+# ${#array[@]} on an empty array as an unbound variable under `set -u`.
+MISSING=""
+for tool in 7z unsquashfs mksquashfs split tar python3; do
+	command -v "$tool" >/dev/null 2>&1 || MISSING="$MISSING $tool"
+done
+# The ISO writer answers to more than one name depending on the system.
+ISO_TOOL=""
+for tool in mkisofs genisoimage xorrisofs; do
+	if command -v "$tool" >/dev/null 2>&1; then
+		ISO_TOOL="$tool"
+		break
+	fi
+done
+[ -n "$ISO_TOOL" ] || MISSING="$MISSING mkisofs"
+
+if [ -n "$MISSING" ]; then
+	die "missing:$MISSING
+  Debian/Ubuntu:  sudo apt install p7zip-full squashfs-tools genisoimage
+  macOS:          brew install p7zip squashfs cdrtools"
+fi
+
+[ -f "$PLAYER_BIN" ] || die "sonix_player is not next to this script."
+
+[ -d "$ASSETS_DIR" ] || die "there is no assets folder next to this script."
+[ -d "$MODEL_ASSETS/usr/resource/sonix" ] ||
+	die "assets/$MODEL_DIR has no Sonix resource tree: the overlay is incomplete."
+[ -f "$SOURCE_UPT" ] || die "v1_original.upt is not next to this script.
+  Download the official TempoTec Variations V1 firmware and run prepare_v1_stock.sh on it."
+say "    $MODEL_NAME: $(basename "$SOURCE_UPT") -> $(basename "$OUTPUT_UPT")"
+
+BUILD_STAMP="$(get_stamp "$PLAYER_BIN")"
+TODAY="$(date +%d%m%Y)"
+say "    binary:  sonix_player, $(get_size "$PLAYER_BIN") bytes, built $BUILD_STAMP"
+if [ "${BUILD_STAMP:0:8}" != "$TODAY" ]; then
+	warn "sonix_player was not built today; build_version will still say when it was."
+fi
+
+# sonix_launch has to be a 32-bit little-endian MIPS executable: the launcher
+# execs it, and a busybox shell that cannot exec it exits without starting the
+# player. The first 20 bytes of the ELF header say so.
+if [ -f "$LAUNCH_BIN" ]; then
+	ELF_HEAD="$(od -An -tx1 -N20 "$LAUNCH_BIN" | tr -d ' \n')"
+	[ "${ELF_HEAD:0:12}" = "7f454c460101" ] && [ "${ELF_HEAD:32:8}" = "02000800" ] ||
+		die "sonix_launch is not a 32-bit little-endian MIPS executable.
+	  Build it with \`make target\` (or \`make sonix_launch\`) in sonix-player."
+	say "    launch:  sonix_launch, $(get_size "$LAUNCH_BIN") bytes"
+else
+	warn "sonix_launch is not next to this script: the launcher keeps its shell for the whole session."
+fi
+say ""
+
+# ==========================================================================
+# The image, start to finish
+# ==========================================================================
+build_image() {
+	say "${YELLOW}###############################################${NC}"
+	say "${YELLOW}###   $MODEL_NAME${NC}"
+	say "${YELLOW}###############################################${NC}"
+	say ""
+	warn "TempoTec V1 firmware is an unofficial community build."
+	warn "Keep the official stock firmware and matching checksum available for recovery before installing it."
+	say ""
+
+	# ==========================================================================
+	# 1. Unpack the stock firmware
+	# ==========================================================================
+	step "[$MODEL_NAME] unpacking $(basename "$SOURCE_UPT")"
+
+	rm -rf "$WORK_DIR" "$SQUASH_DIR" "$MERGED_SQUASHFS"
+	mkdir -p "$WORK_DIR"
+
+	7z x "$SOURCE_UPT" -o"$WORK_DIR" -y > /dev/null
+
+	[ -d "$OTA_DIR" ] || die "there is no ota_v0 folder inside the .upt: not a firmware of this kind."
+	[ -f "$OTA_DIR/ota_update.in" ] || die "there is no ota_v0/ota_update.in inside the .upt."
+
+	# The V1 1.3 stock update carries compatibility=<tag> in a file of its own
+	# beside ota_update.in; earlier ones have none. Nothing in the rootfs or the
+	# kernel reads it, so whatever does read it sits outside this image -- which
+	# is reason enough to hand it on untouched. It is checked again just before
+	# the image is written.
+	COMPAT_FILE="$OTA_DIR/ota_compatibility.in"
+	COMPAT_MD5=""
+	if [ -f "$COMPAT_FILE" ]; then
+		COMPAT_MD5="$(get_md5 "$COMPAT_FILE")"
+		COMPATIBILITY="$(tr -d '\r' < "$COMPAT_FILE" | sed -n 's/^compatibility=//p' | head -n 1)"
+		say "    compatibility marker: ${COMPATIBILITY:-unreadable} (kept as is)"
+	else
+		say "    no compatibility marker (stock updates before 1.3 have none)"
+	fi
+
+	say "    Joining the rootfs chunks..."
+	( cd "$OTA_DIR" && cat rootfs.squashfs.* ) > "$MERGED_SQUASHFS"
+
+	say "    Extracting the filesystem..."
+	unsquashfs -f -d "$SQUASH_DIR" "$MERGED_SQUASHFS" > /dev/null
+	rm -f "$MERGED_SQUASHFS"
+
+	# The old chunks go now: what gets written back must not sit next to what it
+	# replaces, or the image ends up carrying both.
+	rm -f "$OTA_DIR/ota_md5_rootfs.squashfs."* "$OTA_DIR/rootfs."*
+
+	[ -f "$SQUASH_DIR/$STOCK_LAUNCHER" ] || die "the rootfs has no $STOCK_LAUNCHER: unexpected firmware."
+	[ -f "$SQUASH_DIR/$INIT_SCRIPT" ]    || die "the rootfs has no $INIT_SCRIPT: unexpected firmware."
+	say ""
+
+	# Capture the vendor release version before applying the Sonix overlay.
+	# Use the product section, not the schema version, dates or library versions.
+	BASE_BUILD="$(python3 "$SCRIPT_DIR/extract_base_build.py" "$SQUASH_DIR/usr/resource/config.json")"
+	if [ -n "$BASE_BUILD" ]; then
+		say "    TempoTec base version = $BASE_BUILD"
+	else
+		warn "stock config has no unambiguous TempoTec V1 release version; About will show a dash"
+	fi
+
+	# ==========================================================================
+	# 1b. The stock player's own Qobuz and Tidal credentials (opt in)
+	# ==========================================================================
+	#
+	# Qobuz issues no application credentials for personal or open-source
+	# clients, and Tidal's self-serve developer.tidal.com portal only issues
+	# OpenAPI v2 keys that lack the v1 Limited Input Device (device_code) grant.
+	# The pairs this device uses are HiBy's inside usr/bin/hiby_player. They are
+	# not in git and a published image must not carry them, so this only runs on
+	# SONIX_EMBED_STOCK_KEYS=1. The extractor reads the binary while it is still
+	# unpacked -- step 2 removes it -- and the result lands where the player
+	# looks at startup, which makes a private image behave like the stock
+	# firmware: sign in with a Qobuz or Tidal account and nothing to copy to the
+	# card. Values are masked in the output.
+	#
+	# A sealing key (streaming-keys.key, from a player build) gives a sealed
+	# streaming-keys.bin; without one a plain streaming-keys.ini is shipped,
+	# which a keyless build reads anyway. Either way an image made here carries
+	# a third party's API credentials and must not be redistributed.
+	EMBEDDED_PLAIN_KEYS=0
+	if [ "${SONIX_EMBED_STOCK_KEYS:-}" = "1" ]; then
+		step "[$MODEL_NAME] extracting the stock Qobuz and Tidal credentials"
+		command -v python3 >/dev/null 2>&1 || die "SONIX_EMBED_STOCK_KEYS=1 needs python3."
+		EXTRACT_TOOL="$SCRIPT_DIR/../sonix-player/tools/extract_streamkeys.py"
+		[ -f "$EXTRACT_TOOL" ] || die "cannot find $EXTRACT_TOOL"
+		[ -f "$SQUASH_DIR/$STOCK_PLAYER" ] ||
+			die "no $STOCK_PLAYER in the stock rootfs: nothing to extract from."
+
+		EXTRACTED_INI="$WORK_DIR/streaming-keys.ini"
+		COMPONENTS_DIR="$SQUASH_DIR/usr/resource/sonix/components"
+		SEAL_KEY=""
+		for candidate in "${STREAMKEYS_KEY:-}" "$SCRIPT_DIR/streaming-keys.key" \
+		                 "$SCRIPT_DIR/../sonix-player/streaming-keys.key"; do
+			if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+				SEAL_KEY="$candidate"
+				break
+			fi
+		done
+
+		if [ -n "$SEAL_KEY" ]; then
+			if python3 "$EXTRACT_TOOL" "$SQUASH_DIR/$STOCK_PLAYER" -o "$EXTRACTED_INI" \
+				--seal --key "$SEAL_KEY" \
+				--bin-out "$COMPONENTS_DIR/streaming-keys.bin"; then
+				say "    streaming-keys.bin sealed from the stock binary"
+			else
+				warn "the stock credentials could not be extracted: Qobuz and Tidal stay off"
+				warn "run the extractor with --list-candidates, or use a card-side streaming-keys.ini"
+			fi
+		elif python3 "$EXTRACT_TOOL" "$SQUASH_DIR/$STOCK_PLAYER" -o "$EXTRACTED_INI"; then
+			cp -f "$EXTRACTED_INI" "$COMPONENTS_DIR/streaming-keys.ini"
+			EMBEDDED_PLAIN_KEYS=1
+			warn "no streaming-keys.key found: Qobuz and Tidal credentials ship in the clear as streaming-keys.ini"
+			warn "this image now carries HiBy's API credentials -- do not redistribute it"
+		else
+			warn "the stock credentials could not be extracted: Qobuz and Tidal stay off"
+			warn "run the extractor with --list-candidates, or use a card-side streaming-keys.ini"
+		fi
+		say ""
+	fi
+
+	# ==========================================================================
+	# 2. The binary
+	# ==========================================================================
+	step "[$MODEL_NAME] installing sonix_player"
+
+	chmod 777 "$PLAYER_BIN"
+
+	if [ -e "$SQUASH_DIR/$STOCK_PLAYER" ]; then
+		rm -f "$SQUASH_DIR/$STOCK_PLAYER"
+		say "    $STOCK_PLAYER removed"
+	else
+		warn "$STOCK_PLAYER was not there to begin with"
+	fi
+
+	cp -f "$PLAYER_BIN" "$SQUASH_DIR/usr/bin/sonix_player"
+	chmod 777 "$SQUASH_DIR/usr/bin/sonix_player"
+	say "    usr/bin/sonix_player installed (777)"
+	say ""
+
+	# ==========================================================================
+	# 3. The launcher script
+	# ==========================================================================
+	step "[$MODEL_NAME] renaming the launcher"
+
+	mv "$SQUASH_DIR/$STOCK_LAUNCHER" "$SQUASH_DIR/$NEW_LAUNCHER"
+	say "    $STOCK_LAUNCHER -> $NEW_LAUNCHER"
+	rename_player_in "$SQUASH_DIR/$NEW_LAUNCHER" "$NEW_LAUNCHER"
+	# The mode is set after the overlay, not here: the overlay may carry its own
+	# copy of this file and would bring its own mode with it. See step 6.
+	say ""
+
+	# ==========================================================================
+	# 4. The init script
+	# ==========================================================================
+	step "[$MODEL_NAME] updating $INIT_SCRIPT"
+
+	rename_player_in "$SQUASH_DIR/$INIT_SCRIPT" "$INIT_SCRIPT"
+	say ""
+
+	# ==========================================================================
+	# 5. The overlay
+	# ==========================================================================
+	step "[$MODEL_NAME] copying the overlay onto the root of the rootfs"
+
+	# tar rather than cp: it merges into directories that already exist,
+	# overwrites the files that clash, carries the hidden ones, and behaves the
+	# same way on macOS and on Linux -- none of which is true of `cp -a` on both.
+	( cd "$MODEL_ASSETS" && tar cf - . ) | ( cd "$SQUASH_DIR" && tar xf - )
+
+	MODEL_N="$(cd "$MODEL_ASSETS" && find . -type f | wc -l | tr -d ' ')"
+	say "    $MODEL_DIR/: $MODEL_N files"
+
+	# The streaming keys go in sealed, as streaming-keys.bin. One left in the
+	# clear in the assets is not shipped: an image is unpacked by anyone who
+	# downloads it. See tools/seal_streamkeys.py in sonix-player. The one
+	# exception is the ini step 1b generates locally from the stock binary on
+	# SONIX_EMBED_STOCK_KEYS=1: it never comes from the assets tree and the
+	# builder already got the redistribution warning.
+	PLAIN_KEYS="usr/resource/sonix/components/streaming-keys.ini"
+	if [ -f "$SQUASH_DIR/$PLAIN_KEYS" ]; then
+		if [ "$EMBEDDED_PLAIN_KEYS" = "1" ]; then
+			warn "$PLAIN_KEYS was generated from the stock firmware and is intentionally in the clear"
+		else
+			rm -f "$SQUASH_DIR/$PLAIN_KEYS"
+			warn "$MODEL_DIR/$PLAIN_KEYS is in the clear and was left out; seal it with tools/seal_streamkeys.py"
+		fi
+	fi
+	if [ ! -f "$SQUASH_DIR/usr/resource/sonix/components/streaming-keys.bin" ] &&
+	   [ "$EMBEDDED_PLAIN_KEYS" != "1" ]; then
+		warn "no streaming-keys.bin in $MODEL_DIR: Tidal, Qobuz, podcasts and Last.fm stay off"
+		warn "whoever installs it can still turn them on: streaming-keys.ini at the card's root is read at boot"
+	fi
+
+	# The trust store every https:// connection is checked against. Strict
+	# TLS -- the default -- refuses to connect when there is no bundle, so an
+	# image without one looks like "no reply" from Last.fm, Tidal, Qobuz,
+	# podcasts, radio and Subsonic. The stock V1 firmware cannot be relied on
+	# to carry one, so assets/V1 supplies Mozilla's at etc/ssl/cert.pem, the
+	# path this OpenSSL uses by itself (OPENSSLDIR is /etc/ssl).
+	CA_BUNDLE="$SQUASH_DIR/etc/ssl/cert.pem"
+	if [ -s "$CA_BUNDLE" ]; then
+		CA_COUNT="$(grep -c '^-----BEGIN CERTIFICATE-----' "$CA_BUNDLE" || true)"
+		say "    etc/ssl/cert.pem: $CA_COUNT certificates, $(get_size "$CA_BUNDLE") bytes"
+	else
+		warn "no /etc/ssl/cert.pem in the image: https streaming will refuse to connect."
+		warn "add Mozilla's bundle at assets/$MODEL_DIR/etc/ssl/cert.pem -- https://curl.se/ca/cacert.pem"
+	fi
+	say ""
+
+	# ==========================================================================
+	# 5a. The boot script learns the extra boot screens
+	# ==========================================================================
+	#
+	# The script that draws the logo picks one of three files from one field of
+	# the flash marker, and five boot screens do not fit in three branches. So
+	# a block of our own goes in just before the vendor's display logic: it
+	# reads the marker's second field, at byte 8 of the same block, draws Space,
+	# Travelling in space or the custom picture with the vendor's own display
+	# command, and leaves; every other marker leaves the stock chain untouched.
+	# Inserted rather than shipped whole because the script is the vendor's and
+	# stays the vendor's.
+	#
+	# Nothing about that script is assumed -- not its name, not its display
+	# command, not the shape of its branches. The script is whichever under
+	# etc/init.d mentions a logo jpeg; the display command is the words the
+	# script itself puts in front of a logo path; the block goes in before the
+	# first line that mentions one. And everything found is written to
+	# boot-script-report.txt, because a patch that silently does not apply is
+	# worse than one that shouts.
+	#
+	# The [ -f ] guards and the && exit are the fallback: a missing picture, or
+	# a display command that fails, hands control back to the stock chain, so
+	# what a device can lose is the choice, not the boot.
+	#
+	# The custom branch is the one that waits. Its picture is written to the
+	# UBIFS partition by the player, and that partition is mounted a line or two
+	# later in the boot than this script runs -- the same reason the marker lives
+	# in raw NAND at all. The function this block goes into is put in the
+	# background by the script's own start), so waiting costs the boot nothing:
+	# it costs the picture a moment, six seconds at most, and then the stock
+	# chain draws as it always did.
+	step "[$MODEL_NAME] teaching the boot script the extra boot screens"
+
+	REPORT="$SCRIPT_DIR/boot-script-report.txt"
+	{
+		echo "== $MODEL_NAME"
+		echo "-- init scripts mentioning a logo jpeg or the marker:"
+		grep -lE 'logo[0-9a-z_]*\.jpeg|0x20000' "$SQUASH_DIR"/etc/init.d/* 2>/dev/null |
+			sed 's|.*/|   |' || echo "   (none)"
+	} >> "$REPORT"
+
+	BOOT_SCRIPT=""
+	for cand in "$SQUASH_DIR"/etc/init.d/*; do
+		[ -f "$cand" ] || continue
+		if grep -qE 'logo[0-9a-z_]*\.jpeg' "$cand"; then
+			BOOT_SCRIPT="$cand"
+			break
+		fi
+	done
+	if [ -z "$BOOT_SCRIPT" ]; then
+		for cand in "$SQUASH_DIR"/etc/init.d/*; do
+			[ -f "$cand" ] || continue
+			if grep -q "0x20000" "$cand"; then
+				BOOT_SCRIPT="$cand"
+				break
+			fi
+		done
+	fi
+
+	if [ -z "$BOOT_SCRIPT" ]; then
+		warn "no init script mentions a logo jpeg or the marker here."
+		warn "the boot screen setting will only offer what the stock script can draw."
+		echo "-- no boot script found; nothing patched." >> "$REPORT"
+	elif grep -q "sonix boot screen choice" "$BOOT_SCRIPT"; then
+		say "    $(basename "$BOOT_SCRIPT") already carries the choice block"
+		echo "-- $(basename "$BOOT_SCRIPT"): already carried the choice block." >> "$REPORT"
+	else
+		# The display command with its arguments: everything on the first line
+		# carrying a logo path, from just after the last shell keyword up to
+		# just before the path. "then cmd_jpeg_display /etc/logo1.jpeg" gives
+		# cmd_jpeg_display; a vendor that passes flags keeps them.
+		DISPLAY_CMD="$(awk '
+			taken == 0 {
+				for (i = 1; i <= NF; i++) {
+					f = $i; gsub(/["\047]/, "", f)
+					if (f ~ /logo[0-9a-z_]*\.jpeg$/) {
+						cmd = ""
+						for (j = i - 1; j >= 1; j--) {
+							t = $j
+							if (t == "then" || t == "else" || t == "do" || t == "if" ||
+							    t == "elif" || t == ";" || t == "&&" || t == "||" ||
+							    t ~ /=$/ || t ~ /\)$/ || t ~ /^\(/) break
+							cmd = (cmd == "" ? t : t " " cmd)
+						}
+						if (cmd != "" && cmd != "[" && cmd != "[[" && cmd != "test") { print cmd; taken = 1; exit }
+					}
+				}
+			}
+		' "$BOOT_SCRIPT")"
+		# A script that keeps the path in a variable and displays that: the same
+		# walk, ending at the variable instead of at a path.
+		if [ -z "$DISPLAY_CMD" ]; then
+			DISPLAY_CMD="$(awk '
+				taken == 0 {
+					for (i = 1; i <= NF; i++) {
+						f = $i; gsub(/["\047]/, "", f)
+						if (f ~ /^\$[A-Za-z_]/ || f ~ /^\{?[A-Za-z_][A-Za-z0-9_]*\}$/ && seen[f]) {
+							cmd = ""
+							for (j = i - 1; j >= 1; j--) {
+								t = $j
+								if (t == "then" || t == "else" || t == "do" || t == "if" ||
+								    t == "elif" || t == ";" || t == "&&" || t == "||" ||
+								    t ~ /=$/ || t ~ /\)$/ || t ~ /^\(/) break
+								cmd = (cmd == "" ? t : t " " cmd)
+							}
+							if (cmd != "" && cmd != "[" && cmd != "[[" && cmd != "test") { print cmd; taken = 1; exit }
+						}
+						if ($i ~ /^[A-Za-z_][A-Za-z0-9_]*=/) { v = $i; sub(/=.*/, "", v); seen[v] = 1 }
+					}
+				}
+			' "$BOOT_SCRIPT")"
+		fi
+		[ -n "$DISPLAY_CMD" ] || DISPLAY_CMD="cmd_jpeg_display"
+
+		# How the block leaves the vendor script running. The V1 display logic
+		# lives in a function that, after drawing, raises the panel backlight;
+		# an exit there would draw our picture onto a dark panel. So a display
+		# command that is a plain name is shadowed with a no-op function once
+		# ours has drawn: the vendor's own branches then run to the end,
+		# backlight and all, and draw nothing over ours. A command that is a
+		# path cannot be shadowed -- a function cannot wear a slash -- and
+		# exits instead, keeping the picture at the cost of the vendor's tail.
+		# A path cannot be a function name, so a display command that is one
+		# exits after drawing instead of shadowing, at the cost of whatever
+		# the vendor script does after its branches -- on the V1, that is the
+		# backlight, which is why the plain name matters.
+		if [ "${DISPLAY_CMD#/}" = "$DISPLAY_CMD" ]; then
+			LEAVE="$DISPLAY_CMD() { :; }"
+		else
+			LEAVE="exit 0"
+		fi
+
+		# The second field is read as part of one aligned 14-byte read, the same
+		# call shape the vendor's own read uses, and split in the shell: an
+		# unaligned -s is one more thing a vendor nanddump could stumble over,
+		# and this has been wrong often enough to owe us a trace. The trace
+		# file is what the player's Developer options page shows after a boot.
+		# The custom picture, in the writable partition: the player writes it
+		# there when the choice is made (see bootpic.h). A fixed name, because
+		# the twenty-four bytes of marker this block reads carry WHICH picture,
+		# how bright the splash is, and not a path to one.
+		CUSTOM_LOGO="/usr/data/bootlogo_custom.jpeg"
+
+		BOOT_BLOCK="# --- sonix boot screen choice (added by the firmware packer) ---
+boot_raw=\$(nanddump -q -s 0x20000 -l 24 /dev/mtd5 -a 2>/dev/null)
+boot_sel=\${boot_raw#* }
+boot_sel=\${boot_sel%% *}
+boot_light=\${boot_raw##*light:}
+boot_light=\${boot_light%%[!0-9]*}
+case \"\$boot_light\" in ''|*[!0-9]*) boot_light= ;; esac
+[ -n \"\$boot_light\" ] && [ \"\$boot_light\" -gt 100 ] && boot_light=100
+sonix_boot_light() {
+	[ -n \"\$boot_light\" ] || return 0
+	sonix_bl_node=/sys/class/backlight/backlight_pwm0/brightness
+	[ -w \"\$sonix_bl_node\" ] || return 0
+	sonix_bl_max=\$(cat \"\${sonix_bl_node%/brightness}/max_brightness\" 2>/dev/null)
+	case \"\$sonix_bl_max\" in ''|*[!0-9]*) sonix_bl_max=100 ;; esac
+	[ \"\$sonix_bl_max\" -gt 0 ] || sonix_bl_max=100
+	sonix_bl_val=\$(( sonix_bl_max * boot_light / 100 ))
+	[ \"\$sonix_bl_val\" -lt 1 ] && sonix_bl_val=1
+	printf '%s' \"\$sonix_bl_val\" > \"\$sonix_bl_node\" 2>/dev/null
+}
+trap 'sonix_boot_light' EXIT
+echo \"sel=\$boot_sel light=\$boot_light raw=\$boot_raw\" > /tmp/.bootlogo_trace 2>/dev/null
+if [ \"\$boot_sel\" = \"logo:2\" ] && [ -f /etc/logo_space.jpeg ]; then $DISPLAY_CMD /etc/logo_space.jpeg && { echo \"drawn=space\" >> /tmp/.bootlogo_trace; boot_drawn=1; $LEAVE; }; fi
+if [ \"\$boot_sel\" = \"logo:3\" ] && [ -f /etc/logo_travelling.jpeg ]; then $DISPLAY_CMD /etc/logo_travelling.jpeg && { echo \"drawn=travelling\" >> /tmp/.bootlogo_trace; boot_drawn=1; $LEAVE; }; fi
+if [ \"\$boot_sel\" = \"logo:4\" ]; then boot_waited=0; while [ \$boot_waited -lt 60 ] && [ ! -f $CUSTOM_LOGO ]; do boot_waited=\$((boot_waited + 1)); sleep 0.1; done; if [ -f $CUSTOM_LOGO ]; then $DISPLAY_CMD $CUSTOM_LOGO && { echo \"drawn=custom\" >> /tmp/.bootlogo_trace; boot_drawn=1; $LEAVE; }; else echo \"drawn=custom-missing\" >> /tmp/.bootlogo_trace 2>/dev/null; fi; fi
+[ -n \"\$boot_drawn\" ] || echo \"drawn=stock-chain\" >> /tmp/.bootlogo_trace 2>/dev/null
+# --- end sonix boot screen choice ---
+"
+		# The anchor: the line that reads the marker, a plain assignment at the
+		# top of the script and a statement boundary in every shape a shell
+		# script takes -- inside a case arm, which the first logo path can be,
+		# an inserted if would be a syntax error that costs the whole script.
+		# Failing that the first logo path; failing that the top.
+		ANCHOR="$(grep -n "nanddump" "$BOOT_SCRIPT" | head -1 | cut -d: -f1)"
+		[ -n "$ANCHOR" ] || ANCHOR="$(grep -nE 'logo[0-9a-z_]*\.jpeg' "$BOOT_SCRIPT" | head -1 | cut -d: -f1)"
+		[ -n "$ANCHOR" ] || ANCHOR=1
+
+		awk -v block="$BOOT_BLOCK" -v at="$ANCHOR" '
+			NR == at { printf "%s", block }
+			{ print }
+		' "$BOOT_SCRIPT" > "$BOOT_SCRIPT.packer.tmp"
+
+		grep -q "sonix boot screen choice" "$BOOT_SCRIPT.packer.tmp" ||
+			die "the choice block was not inserted into $(basename "$BOOT_SCRIPT")."
+
+		# cat onto the file rather than mv over it: the init script's mode and
+		# owner are the stock ones and the image boots through them.
+		cat "$BOOT_SCRIPT.packer.tmp" > "$BOOT_SCRIPT"
+		rm -f "$BOOT_SCRIPT.packer.tmp"
+		chmod 755 "$BOOT_SCRIPT"
+		say "    $(basename "$BOOT_SCRIPT"): choice block at line $ANCHOR, display command \"$DISPLAY_CMD\""
+
+		{
+			echo "-- patched $(basename "$BOOT_SCRIPT") at line $ANCHOR; display command: $DISPLAY_CMD"
+			echo "-- the logo files in the image:"
+			ls -l "$SQUASH_DIR"/etc/logo*.jpeg 2>/dev/null | sed 's|.*/||; s/^/   /' || echo "   (none)"
+			echo "-- the script as it goes into the image:"
+			sed -n '1,44p' "$BOOT_SCRIPT" | sed 's/^/   /'
+		} >> "$REPORT"
+	fi
+	echo "" >> "$REPORT"
+	say ""
+
+	# ==========================================================================
+	# 5b. The modes that decide whether any of this runs
+	# ==========================================================================
+	#
+	# After the overlay, because the overlay wins: it may carry its own copy of
+	# the launcher, and tar brings the mode along with the file.
+	#
+	# This is not housekeeping. The init script is
+	#
+	#     PL01=/usr/bin/sonix_player.sh
+	#     [ -f $PL01 ] && ( $PL01 & ) || echo "file <$PL01> don't exist."
+	#
+	# and `-f` asks whether the file EXISTS, not whether it can be run. A
+	# launcher that arrives without its execute bit passes that test, fails to
+	# start, takes the `&&` branch so the `||` message is never printed, and
+	# leaves a device sitting on its boot logo with nothing in any log and no
+	# reboot to hint at it. An assets folder that has been through a zip is
+	# enough to cause it, which is why this is checked rather than assumed.
+	step "[$MODEL_NAME] making the boot path executable"
+
+	for rel in "$NEW_LAUNCHER" "$INIT_SCRIPT" usr/bin/bluealsa usr/bin/shairport_on.sh etc/init.d/S80_bt_init; do
+		if [ -f "$SQUASH_DIR/$rel" ]; then
+			chmod 755 "$SQUASH_DIR/$rel"
+			say "    $rel is 755"
+		fi
+	done
+
+	# Anything else the overlay put in a directory of executables, and the
+	# kernel-module scripts with it.
+	for rel in $(cd "$MODEL_ASSETS" && find usr/bin module_driver -type f 2>/dev/null); do
+		[ -f "$SQUASH_DIR/$rel" ] || continue
+		chmod 755 "$SQUASH_DIR/$rel"
+	done
+
+	# The two that decide whether the player is ever started at all.
+	for rel in "$NEW_LAUNCHER" "$INIT_SCRIPT"; do
+		[ -x "$SQUASH_DIR/$rel" ] || die "$rel is not executable in the image.
+	  Nothing would start the player and the device would sit on its boot logo."
+	done
+	say ""
+
+	# ==========================================================================
+	# 5c. sonix_launch
+	# ==========================================================================
+	#
+	# The launcher execs sonix_launch just before the line that starts the
+	# player, so the shell is replaced by a process of a few kB that does what
+	# the rest of the script does: runs the player, then `sleep 1; reboot`. The
+	# original lines stay under it and still run on a rootfs without the binary.
+	if [ -f "$LAUNCH_BIN" ]; then
+		step "[$MODEL_NAME] starting the player through sonix_launch"
+
+		cp -f "$LAUNCH_BIN" "$SQUASH_DIR/usr/bin/sonix_launch"
+		chmod 755 "$SQUASH_DIR/usr/bin/sonix_launch"
+		say "    usr/bin/sonix_launch installed (755)"
+
+		LAUNCHER_FILE="$SQUASH_DIR/$NEW_LAUNCHER"
+		if grep -q "sonix_launch" "$LAUNCHER_FILE"; then
+			say "    $NEW_LAUNCHER already calls it"
+		else
+			PLAYER_LINES="$(grep -c '^/usr/bin/sonix_player$' "$LAUNCHER_FILE" || true)"
+			if [ "$PLAYER_LINES" = "1" ]; then
+				awk '$0 == "/usr/bin/sonix_player" { print "[ -x /usr/bin/sonix_launch ] && exec /usr/bin/sonix_launch /usr/bin/sonix_player" } { print }' \
+					"$LAUNCHER_FILE" > "$LAUNCHER_FILE.new"
+				mv -f "$LAUNCHER_FILE.new" "$LAUNCHER_FILE"
+				chmod 755 "$LAUNCHER_FILE"
+				grep -q "exec /usr/bin/sonix_launch" "$LAUNCHER_FILE" || die "$NEW_LAUNCHER was not rewritten."
+				say "    $NEW_LAUNCHER execs sonix_launch"
+			else
+				rm -f "$SQUASH_DIR/usr/bin/sonix_launch"
+				warn "$NEW_LAUNCHER has $PLAYER_LINES lines that are exactly /usr/bin/sonix_player, not one:
+	  left as it is, and sonix_launch not installed."
+			fi
+		fi
+		say ""
+	fi
+
+	# ==========================================================================
+	# 6. The stock interface's resources
+	# ==========================================================================
+	step "[$MODEL_NAME] removing the stock interface's folders"
+
+	for dir in "${STOCK_UI_DIRS[@]}"; do
+		if [ -e "$SQUASH_DIR/$dir" ]; then
+			rm -rf "$SQUASH_DIR/$dir"
+			[ -e "$SQUASH_DIR/$dir" ] && die "could not remove $dir."
+			say "    $dir removed"
+		else
+			say "    $dir was not there"
+		fi
+	done
+	say ""
+
+	# ==========================================================================
+	# 6b. The stock status-LED driver
+	# ==========================================================================
+	#
+	# The player drives the SGM31324 RGB controller directly over I2C (see
+	# sonix-player/src/system/device/led_i2c.c), which needs the controller free.
+	# The firmware's leds_sgm31324_add.ko holds it and on this kernel will not
+	# unload, so it is never loaded at all: the module script is replaced with a
+	# no-op and the .ko removed, whichever way the stock init brings it up.
+	step "[$MODEL_NAME] disabling the stock LED driver"
+
+	LED_SCRIPT="$SQUASH_DIR/module_driver/leds_sgm31324_add.sh"
+	if [ -e "$LED_SCRIPT" ]; then
+		printf '#!/bin/sh\n# Disabled by the firmware packer: the player drives the SGM31324 directly.\nexit 0\n' > "$LED_SCRIPT"
+		chmod 755 "$LED_SCRIPT"
+		say "    module_driver/leds_sgm31324_add.sh replaced with a no-op"
+	else
+		say "    module_driver/leds_sgm31324_add.sh was not there"
+	fi
+
+	LED_MODULE="$SQUASH_DIR/module_driver/leds_sgm31324_add.ko"
+	if [ -e "$LED_MODULE" ]; then
+		rm -f "$LED_MODULE"
+		say "    module_driver/leds_sgm31324_add.ko removed"
+	else
+		say "    module_driver/leds_sgm31324_add.ko was not there"
+	fi
+	say ""
+
+	# ==========================================================================
+	# 6c. The stock touch driver's post-wake phantom contact
+	# ==========================================================================
+	#
+	# Blanking fb0 lazy-disables the CST8xx interrupt and drops its supply, so
+	# enable_irq() on wake replays a falling edge against a freshly zeroed
+	# register block. hyn_irq_handler treats slot 0's zeros as a touch-down at
+	# (0, 0) despite point_num == 0 and leaves the per-contact scan toggle out
+	# of step (issue #325; see PATCHES.md). Patch the module in place so a
+	# zero-contact frame is never reported as a press; if a future stock update
+	# ships a rebuilt module whose sequence does not match (exit 2), warn and
+	# leave it alone -- the player's own evdev reader drops BTN_TOUCH-less
+	# wake frames too.
+	step "[$MODEL_NAME] patching the touch driver's wake handler"
+
+	TOUCH_MODULE="$SQUASH_DIR/module_driver/cst8xx_touch.ko"
+	# Import adjustment: the V1 fork looked for this tool in the sibling
+	# sonix-player tree. The imported copy lives under sonix-packer/v1/tools,
+	# and builds stage it beside the packer, so try that path first.
+	WAKE_PATCH_TOOL=""
+	for candidate in \
+		"$SCRIPT_DIR/tools/cst8xx_wake_patch.py" \
+		"$SCRIPT_DIR/../sonix-player/tools/cst8xx_wake_patch.py"; do
+		if [ -f "$candidate" ]; then WAKE_PATCH_TOOL="$candidate"; break; fi
+	done
+	if [ -f "$TOUCH_MODULE" ]; then
+		[ -f "$WAKE_PATCH_TOOL" ] || die "cannot find $WAKE_PATCH_TOOL"
+		PATCH_RC=0
+		python3 "$WAKE_PATCH_TOOL" --no-backup "$SQUASH_DIR/module_driver" || PATCH_RC=$?
+		if [ "$PATCH_RC" = "2" ]; then
+			warn "module_driver/cst8xx_touch.ko did not match the wake patch; left as stock"
+			warn "the player's own touch reader still filters unkeyed wake frames"
+		elif [ "$PATCH_RC" != "0" ]; then
+			die "patching module_driver/cst8xx_touch.ko failed (exit $PATCH_RC)."
+		fi
+	else
+		say "    module_driver/cst8xx_touch.ko was not there"
+	fi
+	say ""
+
+	# ==========================================================================
+	# 7. The build stamp
+	# ==========================================================================
+	step "[$MODEL_NAME] system-info.json"
+
+	JSON="$SQUASH_DIR/$SYSTEM_INFO"
+	[ -f "$JSON" ] || die "$SYSTEM_INFO is not in the rootfs.
+	  It should come from assets/$MODEL_DIR/$SYSTEM_INFO"
+
+	# The name in the file against the model being built. Everything the player
+	# decides by model -- the panel it opens the simulator at, the .upt it will
+	# accept, the converter and the serial it prints -- hangs off this one string,
+	# and an image carrying a name this fork does not build for would offer that
+	# player's update to a device that cannot survive it.
+	FOUND_NAME="$(tr -d '\r' < "$JSON" | tr ',' '\n' | grep -i '"device-name"' | head -1 | sed -E 's/.*"device-name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')"
+	[ -n "$FOUND_NAME" ] || die "$SYSTEM_INFO has no device-name."
+	[ "$FOUND_NAME" = "$MODEL_NAME" ] || die "$SYSTEM_INFO says device-name \"$FOUND_NAME\",
+	  but this is the $MODEL_NAME image. Check assets/$MODEL_DIR/$SYSTEM_INFO."
+	say "    device-name = $FOUND_NAME"
+
+	# Whatever case the key was written in. The player reads it case-insensitively
+	# (find_nocase in src/system/device/sysinfo.c), so "Build_version" and
+	# "build_version" are equally correct in the file and this has to accept the
+	# same. The spelling is read out first and then used literally in the
+	# substitution, because sed's case-insensitive flag is a GNU extension and this
+	# has to run on macOS too.
+	KEY="$(grep -oE '"[Bb][Uu][Ii][Ll][Dd]_[Vv][Ee][Rr][Ss][Ii][Oo][Nn]"' "$JSON" | head -1 || true)"
+	[ -n "$KEY" ] || die "$SYSTEM_INFO has no build_version key, in any case."
+
+	sed_file "s/($KEY[[:space:]]*:[[:space:]]*\")[^\"]*(\")/\\1$BUILD_STAMP\\2/" "$JSON"
+
+	grep -q "\"$BUILD_STAMP\"" "$JSON" || die "$KEY was not rewritten."
+	say "    $KEY = $BUILD_STAMP"
+
+	# The extractor emits only a dotted numeric version, safe in this replacement.
+	grep -q '"base_build_version"' "$JSON" || die "$SYSTEM_INFO has no base_build_version key."
+	sed_file "s/(\"base_build_version\"[[:space:]]*:[[:space:]]*\")[^\"]*(\")/\\1$BASE_BUILD\\2/" "$JSON"
+	say "    base_build_version = $BASE_BUILD"
+	say ""
+
+	# ==========================================================================
+	# 8. Repack
+	# ==========================================================================
+	say "${YELLOW}###############################${NC}"
+	say "${YELLOW}###   NEW FILESYSTEM        ###${NC}"
+	say "${YELLOW}###############################${NC}"
+	say ""
+
+	step "[$MODEL_NAME] clearing macOS clutter"
+	find "$SQUASH_DIR" -name '.DS_Store' -type f -delete 2>/dev/null || true
+	find "$SQUASH_DIR" -name '._*' -type f -delete 2>/dev/null || true
+
+	# Nothing this script writes belongs in the image.
+	find "$SQUASH_DIR" -name '*.packer.tmp' -type f -delete 2>/dev/null || true
+
+	ROOTFS_NEW="$OTA_DIR/rootfs.squashfs"
+
+	step "[$MODEL_NAME] building the filesystem"
+	mksquashfs "$SQUASH_DIR" "$ROOTFS_NEW" -comp lzo -all-root > /dev/null
+
+	ORIGINAL_SUM="$(get_md5 "$ROOTFS_NEW")"
+	SIZE="$(get_size "$ROOTFS_NEW")"
+	say "    rootfs.squashfs: $SIZE bytes, md5 $ORIGINAL_SUM"
+
+	step "[$MODEL_NAME] updating ota_update.in"
+	# The kernel is not touched, so its two lines stay exactly as they were:
+	# recomputing them from a file this script never writes would be a way of
+	# getting them wrong.
+	X_SIZE="$(grep -A 3 'img_name=xImage' "$OTA_DIR/ota_update.in" | grep 'img_size' | cut -d= -f2 | tr -d '\r ')"
+	X_MD5="$(grep -A 3 'img_name=xImage' "$OTA_DIR/ota_update.in" | grep 'img_md5' | cut -d= -f2 | tr -d '\r ')"
+
+	[ -n "$X_SIZE" ] && [ -n "$X_MD5" ] || die "cannot read the kernel entry from ota_update.in."
+
+	# Nor is anything else in the file: the version line, the kernel entry, the
+	# order, the blank lines -- the stock file ends on an empty line -- and the
+	# line endings are the stock file's. The rootfs entry's size and MD5 are
+	# the only two values written, in place, so the file reads exactly like the
+	# one TempoTec's own update carries.
+	UPDATE_IN="$OTA_DIR/ota_update.in"
+	if ! awk -v size="$SIZE" -v md5="$ORIGINAL_SUM" '
+		{
+			line = $0
+			cr = sub(/\r$/, "", line) ? "\r" : ""
+			eq = index(line, "=")
+			key = eq ? substr(line, 1, eq - 1) : line
+			if (key == "img_name") rootfs = (substr(line, eq + 1) == "rootfs.squashfs")
+			if (rootfs && key == "img_size") { print "img_size=" size cr; sizes++; next }
+			if (rootfs && key == "img_md5") { print "img_md5=" md5 cr; sums++; next }
+			print
+		}
+		END { if (sizes != 1 || sums != 1) exit 3 }
+	' "$UPDATE_IN" > "$UPDATE_IN.packer.tmp"; then
+		rm -f "$UPDATE_IN.packer.tmp"
+		die "ota_update.in has no single rootfs.squashfs entry with a size and an MD5."
+	fi
+	mv "$UPDATE_IN.packer.tmp" "$UPDATE_IN"
+	grep -q "^img_md5=$ORIGINAL_SUM" "$UPDATE_IN" || die "ota_update.in was not updated."
+
+	step "[$MODEL_NAME] splitting into chunks and building the md5 chain"
+	split -b 524288 -a 4 "$ROOTFS_NEW" "$OTA_DIR/temp_chunk_"
+	rm -f "$ROOTFS_NEW"
+
+	MD5_FILE="$OTA_DIR/ota_md5_rootfs.squashfs.$ORIGINAL_SUM"
+	: > "$MD5_FILE"
+
+	count=0
+	CURRENT_SUM="$ORIGINAL_SUM"
+	for f in "$OTA_DIR/temp_chunk_"*; do
+		[ -e "$f" ] || continue
+		suffix="$(printf "%04d" $count)"
+		NEW_FILENAME="$OTA_DIR/rootfs.squashfs.$suffix.$CURRENT_SUM"
+		mv "$f" "$NEW_FILENAME"
+		CURRENT_SUM="$(get_md5 "$NEW_FILENAME")"
+		echo "$CURRENT_SUM" >> "$MD5_FILE"
+		count=$((count + 1))
+	done
+	say "    $count chunks"
+	say ""
+
+	# ==========================================================================
+	# 9. The image
+	# ==========================================================================
+	say "${YELLOW}###############################${NC}"
+	say "${YELLOW}###   FIRMWARE IMAGE        ###${NC}"
+	say "${YELLOW}###############################${NC}"
+	say ""
+
+	if [ -n "$COMPAT_MD5" ]; then
+		[ -f "$COMPAT_FILE" ] && [ "$(get_md5 "$COMPAT_FILE")" = "$COMPAT_MD5" ] ||
+			die "the stock ota_compatibility.in did not survive the repack."
+	fi
+
+	step "[$MODEL_NAME] writing $(basename "$OUTPUT_UPT")"
+	rm -f "$OUTPUT_UPT"
+	"$ISO_TOOL" -o "$OUTPUT_UPT" -J -r "$WORK_DIR" > /dev/null 2>&1
+
+	[ -f "$OUTPUT_UPT" ] || die "the image was not written."
+
+	# TempoTec distributes a checksum text file beside v1.upt. If the workflow
+	# retained the stock template, preserve its exact wording and replace every
+	# MD5 in it; otherwise write the standard md5sum form. The firmware image is
+	# useful on its own, but shipping the companion avoids making an official
+	# update procedure silently incomplete.
+	V1_SUM="$(get_md5 "$OUTPUT_UPT")"
+	V1_MD5_OUT="$SCRIPT_DIR/v1_md5.txt"
+	V1_MD5_TEMPLATE="$SCRIPT_DIR/v1_md5_original.txt"
+	if [ -f "$V1_MD5_TEMPLATE" ] && grep -Eq '[[:xdigit:]]{32}' "$V1_MD5_TEMPLATE"; then
+		sed -E "s/[[:xdigit:]]{32}/$V1_SUM/g; s/v1_original\\.upt/v1.upt/g" \
+			"$V1_MD5_TEMPLATE" > "$V1_MD5_OUT"
+		grep -qi "$V1_SUM" "$V1_MD5_OUT" || die "could not update the V1 checksum template."
+	else
+		[ ! -f "$V1_MD5_TEMPLATE" ] || warn "V1 checksum template has no MD5; writing standard syntax."
+		printf '%s  v1.upt\n' "$V1_SUM" > "$V1_MD5_OUT"
+	fi
+	say "    v1_md5.txt: $V1_SUM"
+
+	cleanup
+
+	say "  $OUTPUT_UPT"
+	say "  $(get_size "$OUTPUT_UPT") bytes, build_version $BUILD_STAMP"
+	say ""
+}
+
+# ==========================================================================
+# The build
+# ==========================================================================
+build_image
+
+say "${GREEN}#############################${NC}"
+say "${GREEN}###   DONE                ###${NC}"
+say "${GREEN}#############################${NC}"
+say ""
+say "${GREEN}  Ready to be copied to the SD card.${NC}"
+say ""

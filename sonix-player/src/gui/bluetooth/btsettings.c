@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "lvgl/lvgl.h"
 
@@ -20,15 +21,21 @@
 #include "src/gui/shell/toast.h"
 #include "src/gui/shell/topbar.h"
 #include "src/system/bluetooth/bluetooth.h"
+#include "src/system/core/config.h"
 #include "src/system/core/lang.h"
 
 lv_obj_t *btsettings_screen;
 
 #define BT_PAGE_POLL_MS 500
+// A pairing prompt is not the page's business: the pairing it belongs to
+// outlives the page, and bluez waits on it whether the user is looking at the
+// list or not. So its own watch runs for as long as the player does.
+#define PIN_POLL_MS 300
 #define BT_ROW_H 76
 #define CORNER_BTN_SIZE 56
 
 static lv_obj_t *bt_switch;
+static lv_obj_t *car_switch;
 static lv_obj_t *status_label;
 static lv_obj_t *paired_label;
 static lv_obj_t *paired_list;
@@ -39,6 +46,7 @@ static lv_obj_t *scan_icon;
 static lv_obj_t *receiver_btn;
 static lv_obj_t *receiver_icon;
 static lv_timer_t *poll_timer;
+static lv_timer_t *pin_timer;
 
 static uint32_t drawn_serial = 0xFFFFFFFFu;
 static bool drawn_enabled;
@@ -84,6 +92,8 @@ static char pairing_mac[BT_MAC_MAX];
 static char pairing_name[BT_NAME_MAX];
 static uint32_t pairing_started_ms;
 
+static void pin_hide_layer(void);
+
 static bool pairing_watch_active(void) { return pairing_timer != NULL; }
 
 static void pairing_watch_stop(void) {
@@ -91,6 +101,12 @@ static void pairing_watch_stop(void) {
 		lv_timer_delete(pairing_timer);
 		pairing_timer = NULL;
 	}
+	// A prompt left over from this pairing has nobody to answer any more: the
+	// pairing is over, one way or the other.
+	if (bluetooth_pin_pending()) {
+		bluetooth_cancel_pin();
+	}
+	pin_hide_layer();
 	gui_modal_hide();
 	pairing_mac[0] = '\0';
 }
@@ -173,6 +189,10 @@ static void refresh_status_label(void) {
 		return;
 	}
 
+	if (bluetooth_car_mode_restarting()) {
+		lv_label_set_text(status_label, tr("bt_car_mode_switching"));
+		return;
+	}
 	if (bluetooth_busy()) {
 		lv_label_set_text(status_label, bluetooth_get_enabled() ? tr("turning_on") : tr("bt_turning_off"));
 		return;
@@ -227,6 +247,33 @@ static keyboard_t *rename_keyboard;
 // sheet if another row's menu is opened from behind it.
 static char rename_mac[BT_MAC_MAX];
 
+// PIN/passkey pairing prompt. One column on a sheet: the question, the device,
+// the hint, the field or the code, and the two answers directly under them --
+// never a button bar at the far edge of the screen.
+static lv_obj_t *pin_layer;
+static lv_obj_t *pin_content;
+static lv_obj_t *pin_title;
+static lv_obj_t *pin_device;
+static lv_obj_t *pin_code_box;
+static lv_obj_t *pin_code;
+static lv_obj_t *pin_hint;
+static lv_obj_t *pin_field;
+static keyboard_t *pin_keyboard;
+static lv_obj_t *pin_buttons;
+static lv_obj_t *pin_ok_btn;
+static lv_obj_t *pin_cancel_btn;
+static int pin_shown_mode = -999;
+static char pin_shown_value[32];
+static char pin_shown_device[BT_MAC_MAX];
+
+// Consent sheet shown before the R1 asks to pair. A typed code here would not
+// reach BlueZ, so the sheet only carries the user's yes/no.
+static lv_obj_t *consent_layer;
+static lv_obj_t *consent_card;
+static lv_obj_t *consent_message;
+static char consent_mac[BT_MAC_MAX];
+static char consent_name[BT_NAME_MAX];
+
 static void rename_layer_hide(void) {
 	if (rename_layer) {
 		lv_obj_set_hidden(rename_layer, true);
@@ -274,6 +321,271 @@ static void rename_action(void *user) {
 	// The sheet has its own close in the corner, and the chevron under it would
 	// leave the page without putting the keyboard away.
 	back_btn_force_hidden(true);
+}
+
+
+static gui_config_t *g_cfg;
+
+static void pin_hide_layer(void) {
+	if (pin_layer) {
+		lv_obj_set_hidden(pin_layer, true);
+	}
+	back_btn_force_hidden(false);
+	pin_shown_mode = -999;
+	pin_shown_value[0] = '\0';
+	pin_shown_device[0] = '\0';
+}
+
+static void pin_submit_cb(lv_event_t *e) {
+	(void)e;
+	int mode = bluetooth_pin_mode();
+	if (mode == 0 || mode == 1) {
+		const char *txt = pin_field ? lv_textarea_get_text(pin_field) : "";
+		bluetooth_submit_pin(txt ? txt : "");
+	} else if (mode == 2 || mode == 4) {
+		bluetooth_submit_pin("yes");
+	} else {
+		// Display mode: bluez has already been answered; the button only
+		// takes the code off the screen.
+		bluetooth_submit_pin(NULL);
+	}
+	pin_hide_layer();
+}
+
+static void pin_cancel_cb(lv_event_t *e) {
+	(void)e;
+	bluetooth_cancel_pin();
+	pin_hide_layer();
+}
+
+static lv_obj_t *pin_button(lv_obj_t *parent, const char *text, bool accent, lv_event_cb_t cb) {
+	lv_obj_t *btn = lv_btn_create(parent);
+	lv_obj_set_height(btn, 64);
+	lv_obj_set_flex_grow(btn, 1);
+	lv_obj_set_style_radius(btn, 12, 0);
+	lv_obj_set_style_border_width(btn, 0, 0);
+	lv_obj_set_style_shadow_width(btn, 0, 0);
+	if (accent) {
+		lv_obj_add_style(btn, &theme_style_accent_bg, 0);
+	} else {
+		lv_obj_add_style(btn, &theme_style_switch, 0);
+	}
+	lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+	lv_obj_t *label = lv_label_create(btn);
+	lv_label_set_text(label, tr(text));
+	lv_obj_set_style_text_font(label, &font_ui_24, 0);
+	lv_obj_set_style_text_color(label, accent ? lv_color_white() : theme()->text_primary, 0);
+	lv_obj_center(label);
+	return btn;
+}
+
+static void ensure_pin_layer(void) {
+	if (pin_layer || !g_cfg) return;
+	gui_config_t *cfg = g_cfg;
+
+	// The top layer, not the page: a pairing in flight puts the pairing notice
+	// on the top layer as well, and a prompt under it would be invisible.
+	pin_layer = lv_obj_create(lv_layer_top());
+	lv_obj_set_size(pin_layer, lv_pct(100), lv_pct(100));
+	lv_obj_align(pin_layer, LV_ALIGN_TOP_LEFT, 0, 0);
+	lv_obj_add_style(pin_layer, &theme_style_screen, 0);
+	lv_obj_set_style_bg_opa(pin_layer, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(pin_layer, 0, 0);
+	lv_obj_set_style_radius(pin_layer, 0, 0);
+	lv_obj_set_style_pad_all(pin_layer, 0, 0);
+	lv_obj_set_scrollable(pin_layer, false);
+	lv_obj_set_hidden(pin_layer, true);
+
+	// Everything lives in one column above the keyboard. The row of answers is
+	// part of that column, so it follows the field or the code instead of
+	// drifting to the bottom edge of the screen.
+	pin_content = lv_obj_create(pin_layer);
+	lv_obj_set_width(pin_content, lv_pct(100));
+	lv_obj_set_height(pin_content, cfg->screen_height - 316);
+	lv_obj_align(pin_content, LV_ALIGN_TOP_LEFT, 0, 0);
+	lv_obj_set_style_bg_opa(pin_content, 0, 0);
+	lv_obj_set_style_border_width(pin_content, 0, 0);
+	lv_obj_set_style_radius(pin_content, 0, 0);
+	lv_obj_set_style_pad_left(pin_content, cfg->padding, 0);
+	lv_obj_set_style_pad_right(pin_content, cfg->padding, 0);
+	lv_obj_set_style_pad_top(pin_content, cfg->padding + cfg->top_bar_height + 10, 0);
+	lv_obj_set_style_pad_bottom(pin_content, 12, 0);
+	lv_obj_set_style_pad_gap(pin_content, 10, 0);
+	lv_obj_set_scrollable(pin_content, false);
+	lv_obj_set_flex_flow(pin_content, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_flex_align(pin_content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+
+	pin_title = lv_label_create(pin_content);
+	lv_label_set_long_mode(pin_title, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(pin_title, lv_pct(100));
+	lv_obj_add_style(pin_title, &theme_style_text, 0);
+	lv_obj_set_style_text_font(pin_title, &font_ui_24, 0);
+	lv_obj_set_style_text_align(pin_title, LV_TEXT_ALIGN_LEFT, 0);
+
+	pin_device = lv_label_create(pin_content);
+	lv_label_set_long_mode(pin_device, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(pin_device, lv_pct(100));
+	lv_obj_add_style(pin_device, &theme_style_text_dim, 0);
+	lv_obj_set_style_text_font(pin_device, &font_ui_20, 0);
+	lv_obj_set_style_text_align(pin_device, LV_TEXT_ALIGN_LEFT, 0);
+
+	pin_hint = lv_label_create(pin_content);
+	lv_label_set_long_mode(pin_hint, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(pin_hint, lv_pct(100));
+	lv_obj_add_style(pin_hint, &theme_style_text_dim, 0);
+	lv_obj_set_style_text_font(pin_hint, &font_ui_20, 0);
+	lv_obj_set_style_text_align(pin_hint, LV_TEXT_ALIGN_LEFT, 0);
+
+	// The code gets a field-sized box of its own, so the confirmation reads as
+	// one number to compare rather than a third line of prose.
+	pin_code_box = lv_obj_create(pin_content);
+	lv_obj_set_width(pin_code_box, lv_pct(100));
+	lv_obj_set_height(pin_code_box, 62);
+	lv_obj_add_style(pin_code_box, &theme_style_card, 0);
+	lv_obj_set_style_radius(pin_code_box, 12, 0);
+	lv_obj_set_style_border_width(pin_code_box, 0, 0);
+	lv_obj_set_style_shadow_width(pin_code_box, 0, 0);
+	lv_obj_set_style_pad_all(pin_code_box, 0, 0);
+	lv_obj_set_scrollable(pin_code_box, false);
+	lv_obj_set_hidden(pin_code_box, true);
+
+	pin_code = lv_label_create(pin_code_box);
+	lv_obj_add_style(pin_code, &theme_style_text, 0);
+	lv_obj_set_style_text_font(pin_code, &font_ui_36_bold, 0);
+	lv_obj_set_style_text_color(pin_code, theme()->accent, 0);
+	lv_obj_set_style_text_align(pin_code, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_center(pin_code);
+
+	pin_field = lv_textarea_create(pin_content);
+	lv_textarea_set_one_line(pin_field, true);
+	lv_textarea_set_max_length(pin_field, 16);
+	lv_obj_set_width(pin_field, lv_pct(100));
+	lv_obj_set_height(pin_field, 62);
+	lv_obj_set_scrollbar_mode(pin_field, LV_SCROLLBAR_MODE_OFF);
+	lv_obj_add_style(pin_field, &theme_style_card, 0);
+	lv_obj_set_style_radius(pin_field, 12, 0);
+	lv_obj_set_style_border_width(pin_field, 0, 0);
+	lv_obj_set_style_shadow_width(pin_field, 0, 0);
+	lv_obj_set_style_pad_all(pin_field, 14, 0);
+	lv_obj_set_style_text_font(pin_field, &font_ui_24, 0);
+	keyboard_style_caret(pin_field);
+
+	pin_buttons = lv_obj_create(pin_content);
+	lv_obj_set_width(pin_buttons, lv_pct(100));
+	lv_obj_set_height(pin_buttons, 64);
+	lv_obj_set_style_bg_opa(pin_buttons, 0, 0);
+	lv_obj_set_style_border_width(pin_buttons, 0, 0);
+	lv_obj_set_style_pad_all(pin_buttons, 0, 0);
+	lv_obj_set_style_pad_gap(pin_buttons, 12, 0);
+	lv_obj_set_scrollable(pin_buttons, false);
+	lv_obj_set_flex_flow(pin_buttons, LV_FLEX_FLOW_ROW);
+	lv_obj_set_flex_align(pin_buttons, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+	pin_cancel_btn = pin_button(pin_buttons, "cancel", false, pin_cancel_cb);
+	pin_ok_btn = pin_button(pin_buttons, "ok", true, pin_submit_cb);
+
+	pin_keyboard = keyboard_create(pin_layer, cfg->screen_width, 316, pin_field, NULL, "ok", pin_submit_cb, NULL);
+}
+
+static void pin_device_name(const char *address, char *out, size_t size) {
+	if (!out || size == 0) return;
+	out[0] = '\0';
+	if (!address || !address[0]) return;
+
+	bt_device_t devices[BT_MAX_DEVICES];
+	int count = bluetooth_get_paired(devices, BT_MAX_DEVICES);
+	for (int i = 0; i < count; i++) {
+		if (strcasecmp(devices[i].mac, address) == 0) {
+			snprintf(out, size, "%s", devices[i].name);
+			return;
+		}
+	}
+	count = bluetooth_get_found(devices, BT_MAX_DEVICES);
+	for (int i = 0; i < count; i++) {
+		if (strcasecmp(devices[i].mac, address) == 0) {
+			snprintf(out, size, "%s", devices[i].name);
+			return;
+		}
+	}
+	snprintf(out, size, "%s", address);
+}
+
+static void update_pin_ui(void) {
+	if (!bluetooth_pin_pending()) {
+		if (pin_layer && !lv_obj_is_hidden(pin_layer)) {
+			pin_hide_layer();
+		}
+		return;
+	}
+	ensure_pin_layer();
+	if (!pin_layer) return;
+	// Keep it above the pairing notice even if that notice was shown again
+	// while the prompt sat underneath.
+	if (!lv_obj_is_hidden(pin_layer)) {
+		lv_obj_move_foreground(pin_layer);
+	}
+
+	int mode = bluetooth_pin_mode();
+	const char *dev = bluetooth_pin_pending_device();
+	const char *val = bluetooth_pin_display();
+	if (mode == pin_shown_mode && strcmp(val ? val : "", pin_shown_value) == 0 &&
+		strcmp(dev ? dev : "", pin_shown_device) == 0) {
+		return;
+	}
+	pin_shown_mode = mode;
+	snprintf(pin_shown_value, sizeof(pin_shown_value), "%s", val ? val : "");
+	snprintf(pin_shown_device, sizeof(pin_shown_device), "%s", dev ? dev : "");
+
+	lv_obj_set_hidden(pin_layer, false);
+	lv_obj_move_foreground(pin_layer);
+	back_btn_force_hidden(true);
+
+	char name[BT_NAME_MAX];
+	pin_device_name(dev, name, sizeof(name));
+	lv_label_set_text(pin_device, name[0] ? name : (dev ? dev : ""));
+
+	bool entry = (mode == 0 || mode == 1);
+	bool confirm = (mode == 2);
+	bool display = (mode == 3);
+	bool authorize = (mode == 4);
+
+	// The keyboard is 316 px at the bottom; the column stops above it. With no
+	// keyboard the column may use the whole screen.
+	lv_obj_set_height(pin_content, g_cfg->screen_height - (entry ? 316 : 0));
+	lv_obj_set_hidden(pin_field, !entry);
+	lv_obj_set_hidden(pin_code_box, entry || authorize);
+	lv_obj_set_hidden(pin_hint, false);
+	lv_obj_set_hidden(pin_cancel_btn, display);
+
+	if (entry) {
+		lv_label_set_text(pin_title, tr("bt_pairing_request"));
+		lv_label_set_text(pin_hint, mode == 0 ? tr("bt_enter_pin") : tr("bt_enter_passkey"));
+		lv_textarea_set_text(pin_field, "");
+		lv_textarea_set_placeholder_text(pin_field, mode == 0 ? "PIN" : "000000");
+		lv_textarea_set_accepted_chars(pin_field, mode == 0 ? NULL : "0123456789");
+		if (pin_keyboard) {
+			keyboard_set_field(pin_keyboard, pin_field);
+			keyboard_set_visible(pin_keyboard, true);
+			keyboard_reset(pin_keyboard);
+		}
+	} else if (confirm) {
+		lv_label_set_text(pin_title, tr("bt_confirm_passkey"));
+		lv_label_set_text(pin_hint, tr("bt_confirm_passkey_hint"));
+		lv_label_set_text(pin_code, val ? val : "");
+		if (pin_keyboard) keyboard_set_visible(pin_keyboard, false);
+	} else if (display) {
+		lv_label_set_text(pin_title, tr("bt_pairing_request"));
+		lv_label_set_text(pin_hint, tr("bt_display_passkey_hint"));
+		lv_label_set_text(pin_code, val ? val : "");
+		if (pin_keyboard) keyboard_set_visible(pin_keyboard, false);
+	} else if (authorize) {
+		lv_label_set_text(pin_title, tr("bt_pairing_authorize"));
+		lv_label_set_text(pin_hint, name[0] ? name : (dev ? dev : ""));
+		if (pin_keyboard) keyboard_set_visible(pin_keyboard, false);
+	} else {
+		pin_hide_layer();
+	}
 }
 
 static void build_rename_layer(gui_config_t *cfg) {
@@ -400,6 +712,117 @@ static void row_menu_clicked_cb(lv_event_t *e) {
 	show_device_menu(button, row && lv_obj_get_user_data(row) != NULL);
 }
 
+static void consent_hide(void) {
+	if (consent_layer) {
+		lv_obj_set_hidden(consent_layer, true);
+	}
+	back_btn_force_hidden(false);
+}
+
+static void consent_cancel_cb(lv_event_t *e) {
+	(void)e;
+	consent_hide();
+}
+
+static void consent_ok_cb(lv_event_t *e) {
+	(void)e;
+	char mac[BT_MAC_MAX];
+	char name[BT_NAME_MAX];
+	snprintf(mac, sizeof(mac), "%s", consent_mac);
+	snprintf(name, sizeof(name), "%s", consent_name);
+	consent_hide();
+	bluetooth_pair(mac);
+	pairing_watch_start(mac, name);
+}
+
+static lv_obj_t *consent_button(lv_obj_t *parent, const char *text, bool accent, lv_event_cb_t cb) {
+	lv_obj_t *btn = lv_btn_create(parent);
+	lv_obj_set_height(btn, 64);
+	lv_obj_set_flex_grow(btn, 1);
+	lv_obj_set_style_radius(btn, 12, 0);
+	lv_obj_set_style_border_width(btn, 0, 0);
+	lv_obj_set_style_shadow_width(btn, 0, 0);
+	if (accent) {
+		lv_obj_add_style(btn, &theme_style_accent_bg, 0);
+	} else {
+		lv_obj_add_style(btn, &theme_style_switch, 0);
+	}
+	lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+	lv_obj_t *label = lv_label_create(btn);
+	lv_label_set_text(label, tr(text));
+	lv_obj_set_style_text_font(label, &font_ui_24, 0);
+	lv_obj_set_style_text_color(label, accent ? lv_color_white() : theme()->text_primary, 0);
+	lv_obj_center(label);
+	return btn;
+}
+
+static void ensure_consent_layer(gui_config_t *cfg) {
+	if (consent_layer) {
+		return;
+	}
+	consent_layer = lv_obj_create(lv_layer_top());
+	lv_obj_set_size(consent_layer, lv_pct(100), lv_pct(100));
+	lv_obj_align(consent_layer, LV_ALIGN_TOP_LEFT, 0, 0);
+	lv_obj_set_style_bg_color(consent_layer, lv_color_black(), 0);
+	lv_obj_set_style_bg_opa(consent_layer, LV_OPA_60, 0);
+	lv_obj_set_style_border_width(consent_layer, 0, 0);
+	lv_obj_set_style_pad_all(consent_layer, 0, 0);
+	lv_obj_set_scrollable(consent_layer, false);
+	lv_obj_set_hidden(consent_layer, true);
+
+	int width = cfg->screen_width - 2 * cfg->padding;
+	if (width > 420) {
+		width = 420;
+	}
+	consent_card = lv_obj_create(consent_layer);
+	lv_obj_set_width(consent_card, width);
+	lv_obj_set_height(consent_card, LV_SIZE_CONTENT);
+	lv_obj_add_style(consent_card, &theme_style_card, 0);
+	lv_obj_set_style_radius(consent_card, 18, 0);
+	lv_obj_set_style_border_width(consent_card, 0, 0);
+	lv_obj_set_style_shadow_width(consent_card, 0, 0);
+	lv_obj_set_style_pad_all(consent_card, 20, 0);
+	lv_obj_set_style_pad_gap(consent_card, 12, 0);
+	lv_obj_set_flex_flow(consent_card, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_flex_align(consent_card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	lv_obj_center(consent_card);
+
+	lv_obj_t *title = lv_label_create(consent_card);
+	lv_label_set_text(title, tr("bt_pairing_consent"));
+	lv_obj_add_style(title, &theme_style_text, 0);
+	lv_obj_set_style_text_font(title, &font_ui_26, 0);
+
+	consent_message = lv_label_create(consent_card);
+	lv_label_set_long_mode(consent_message, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(consent_message, lv_pct(100));
+	lv_obj_add_style(consent_message, &theme_style_text_dim, 0);
+	lv_obj_set_style_text_font(consent_message, &font_ui_20, 0);
+
+	lv_obj_t *buttons = lv_obj_create(consent_card);
+	lv_obj_set_width(buttons, lv_pct(100));
+	lv_obj_set_height(buttons, 64);
+	lv_obj_set_style_bg_opa(buttons, 0, 0);
+	lv_obj_set_style_border_width(buttons, 0, 0);
+	lv_obj_set_style_pad_all(buttons, 0, 0);
+	lv_obj_set_style_pad_gap(buttons, 12, 0);
+	lv_obj_set_flex_flow(buttons, LV_FLEX_FLOW_ROW);
+	consent_button(buttons, "cancel", false, consent_cancel_cb);
+	consent_button(buttons, "bt_pairing_consent_confirm", true, consent_ok_cb);
+}
+
+static void consent_show(const char *mac, const char *name) {
+	if (!g_cfg) {
+		return;
+	}
+	ensure_consent_layer(g_cfg);
+	snprintf(consent_mac, sizeof(consent_mac), "%s", mac ? mac : "");
+	snprintf(consent_name, sizeof(consent_name), "%s", name ? name : "");
+	lv_label_set_text_fmt(consent_message, tr("bt_pairing_consent_note"), consent_name[0] ? consent_name : consent_mac);
+	lv_obj_set_hidden(consent_layer, false);
+	lv_obj_move_foreground(consent_layer);
+	back_btn_force_hidden(true);
+}
+
 static void found_row_clicked_cb(lv_event_t *e) {
 	if (switcher_back_drag_active()) {
 		return;
@@ -421,6 +844,10 @@ static void found_row_clicked_cb(lv_event_t *e) {
 		}
 	}
 
+	if (config_get_bool("bluetooth", "confirm_pairing", false)) {
+		consent_show(mac, name);
+		return;
+	}
 	bluetooth_pair(mac);
 	pairing_watch_start(mac, name);
 }
@@ -592,6 +1019,12 @@ static void switch_changed_cb(lv_event_t *e) {
 	topbar_refresh_radios();
 }
 
+static void car_changed_cb(lv_event_t *e) {
+	(void)e;
+	bool on = lv_obj_has_state(car_switch, LV_STATE_CHECKED);
+	bluetooth_car_mode_set(on);
+}
+
 // The radio is up and answering, which is not the same as the switch being on:
 // that is true from the moment it is tapped and stays true for the ten seconds
 // the stack needs to load. A scan started in that window finds nothing and
@@ -632,15 +1065,31 @@ static void scan_clicked_cb(lv_event_t *e) {
 	rebuild_lists();
 }
 
+static void pin_poll_cb(lv_timer_t *timer) {
+	(void)timer;
+	update_pin_ui();
+}
+
 static void poll_cb(lv_timer_t *timer) {
 	(void)timer;
 
+	update_pin_ui();
+
 	bool on = bluetooth_get_enabled();
-	if (lv_obj_has_state(bt_switch, LV_STATE_CHECKED) != on) {
+	if (bt_switch && lv_obj_has_state(bt_switch, LV_STATE_CHECKED) != on) {
 		if (on) {
 			lv_obj_add_state(bt_switch, LV_STATE_CHECKED);
 		} else {
 			lv_obj_remove_state(bt_switch, LV_STATE_CHECKED);
+		}
+	}
+
+	bool car = bluetooth_car_mode_get();
+	if (car_switch && lv_obj_has_state(car_switch, LV_STATE_CHECKED) != car) {
+		if (car) {
+			lv_obj_add_state(car_switch, LV_STATE_CHECKED);
+		} else {
+			lv_obj_remove_state(car_switch, LV_STATE_CHECKED);
 		}
 	}
 
@@ -722,6 +1171,7 @@ static void screen_loaded_cb(lv_event_t *e) {
 	lv_timer_resume(poll_timer);
 	lv_timer_ready(poll_timer);
 	bluetooth_refresh();
+	update_pin_ui();
 	// Visible to other devices only from here. Searching and being searched for
 	// are the two halves of the same page: without this a phone looking for the
 	// player finds nothing, whatever it does.
@@ -734,6 +1184,12 @@ static void screen_unloaded_cb(lv_event_t *e) {
 	if (rename_layer && !lv_obj_is_hidden(rename_layer)) {
 		rename_layer_hide();
 	}
+	if (consent_layer && !lv_obj_is_hidden(consent_layer)) {
+		consent_hide();
+	}
+	// The pairing notice stays up across screens, and so must a question the
+	// pairing is waiting on: hiding it here would leave bluez calling into a
+	// prompt nobody can see. The watch timer takes it down if pairing ends.
 	lv_timer_pause(poll_timer);
 	bluetooth_set_discoverable(false);
 	if (bluetooth_scan_running()) {
@@ -791,12 +1247,18 @@ static lv_obj_t *make_section(lv_obj_t *container, const char *title, lv_obj_t *
 }
 
 void btsettings_init(gui_config_t *cfg) {
+	g_cfg = cfg;
 	lv_obj_t *container = settingsrow_page(btsettings_screen, cfg, "bluetooth");
 	settingsrow_title_corner_slots(settingsrow_page_title(btsettings_screen), cfg, 3);
 
 	settingsrow_toggle(container, "bluetooth", &bt_switch, switch_changed_cb);
 	if (bluetooth_get_enabled()) {
 		lv_obj_add_state(bt_switch, LV_STATE_CHECKED);
+	}
+
+	settingsrow_toggle(container, "bt_car_mode", &car_switch, car_changed_cb);
+	if (bluetooth_car_mode_get()) {
+		lv_obj_add_state(car_switch, LV_STATE_CHECKED);
 	}
 
 	status_label = lv_label_create(container);
@@ -830,6 +1292,8 @@ void btsettings_init(gui_config_t *cfg) {
 	poll_timer = lv_timer_create(poll_cb, BT_PAGE_POLL_MS, NULL);
 	lv_timer_pause(poll_timer);
 
+	pin_timer = lv_timer_create(pin_poll_cb, PIN_POLL_MS, NULL);
+
 	lv_obj_add_event_cb(btsettings_screen, screen_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
 	lv_obj_add_event_cb(btsettings_screen, switched_elsewhere_cb, LV_EVENT_REFRESH, NULL);
 	lv_obj_add_event_cb(btsettings_screen, screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
@@ -840,3 +1304,25 @@ void btsettings_init(gui_config_t *cfg) {
 	refresh_status_label();
 	rebuild_lists();
 }
+
+#ifdef HOST_BUILD
+// Simulator-only: open the first paired device's menu so the layout can be
+// looked at without a mouse. Driven by SONIX_OPEN_BT_MENU in main.c.
+void btsettings_host_show_consent(void) {
+	consent_show("28:0F:EB:AC:53:EA", "Media Display");
+}
+
+void btsettings_host_open_device_menu(void) {
+	if (!paired_list) {
+		return;
+	}
+	rebuild_lists();
+	lv_obj_update_layout(paired_list);
+	lv_obj_t *row = lv_obj_get_child(paired_list, 0);
+	if (!row) {
+		return;
+	}
+	remember_mac("28:0F:EB:AC:53:EA");
+	show_device_menu(row, true);
+}
+#endif

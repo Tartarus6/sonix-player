@@ -1,0 +1,76 @@
+#ifndef USBHOSTPROBE_H
+#define USBHOSTPROBE_H
+
+#include <stdbool.h>
+
+// True only on the TempoTec V1. Every operation in this module that forces the
+// port's role (and therefore supplies VBUS before a device is identified) is
+// gated on this, so R1 and R3 Pro II never touch the TCS1421 or x1600 PHY.
+bool usbhost_is_v1(void);
+
+// Minimal coordination with the unified USB layer. The fork's usb.c API of
+// the same names is not part of this port; these keep the probe compileable
+// without changing shared device code. They are no-ops off the V1.
+bool usb_external_host_reserve(void);
+void usb_external_host_release(void);
+void usb_external_host_block_recovery(void);
+bool usb_external_host_reserved(void);
+bool usb_external_host_restore_safe(void);
+
+// Kept across the player's first-start cleanup so recovery can run before a
+// gadget is allowed to claim a port left in forced host mode.
+#define USBHOST_JOURNAL_NAME ".sonix-usb-host-probe"
+
+// An explicit, temporary V1 host-role retry for an external USB audio device.
+// This is not automatic detection: VBUS without a readable OTG ID cannot tell
+// a DAC from a charger. The user must confirm that only a DAC is connected.
+typedef enum {
+	USBHOST_PROBE_STARTED,
+	USBHOST_PROBE_BUSY,
+	USBHOST_PROBE_UNSUPPORTED,
+	USBHOST_PROBE_FAILED,
+} usbhost_probe_result_t;
+
+typedef enum {
+	USBHOST_EVENT_NONE,
+	USBHOST_EVENT_CARD,
+	USBHOST_EVENT_TIMEOUT,
+	USBHOST_EVENT_REMOVED,
+	USBHOST_EVENT_RESTORE_FAILED,
+	USBHOST_EVENT_RESTORED,
+} usbhost_probe_event_t;
+
+usbhost_probe_result_t usbhostprobe_begin(void);
+
+// The same request, made to last.
+//
+// A USB-C sound card presents nothing on the CC lines that this port reads as
+// a request for the host role, so on the dual-role setting the controller
+// never supplies the far end and the card never enumerates. Two different
+// dongles -- a JCally and an ESR -- were each invisible until the trial above
+// forced Source/host, and each worked perfectly once it had. So the same
+// writes are kept for as long as something is worth playing to, with no
+// diagnostic time limit: only a charger, a computer or a phone on the port,
+// another owner (ADB, DAC mode, storage) or the user ends it.
+//
+// Still explicit: it is reached through the setting in developer options, and
+// it is the same privilege as the trial -- this player is the one supplying
+// the port's power.
+usbhost_probe_result_t usbhostprobe_begin_held(void);
+
+// True while the role is held rather than being tried.
+bool usbhostprobe_held(void);
+
+usbhost_probe_event_t usbhostprobe_poll(bool audio_card, bool audio_interface);
+// True only once both the PHY override and the original Type-C mode are back.
+// If restoration fails, ownership is retained and the poll retries it.
+bool usbhostprobe_cancel(void);
+bool usbhostprobe_active(void);
+// True while a failed/incomplete restore is still retaining the controller.
+bool usbhostprobe_restore_pending(void);
+// Call before Sonix starts a USB gadget. A journal on the settings partition
+// retains an interrupted override across a player crash or reboot. Earlier
+// stock init scripts can still claim the port; recovery then fails closed.
+void usbhostprobe_recover(void);
+
+#endif

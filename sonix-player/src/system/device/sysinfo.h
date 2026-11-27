@@ -39,8 +39,8 @@ void sysinfo_load(void);
 const char *sysinfo_os_version(void);
 const char *sysinfo_build_version(void);
 
-// The name of the player, verbatim from the file: "HiBy R3 Pro II", "HiBy R1".
-// "" when the file does not say.
+// The name of the player, verbatim from the file: "HiBy R3 Pro II", "HiBy R1"
+// or "TempoTec V1". "" when the file does not say.
 const char *sysinfo_device_name(void);
 
 // The converter, verbatim from the file, for the information page to print.
@@ -73,6 +73,9 @@ typedef struct {
 	bool tap_wake;			   // the touch controller can wake the screen (power.h)
 	bool one_flank;			   // every button on the right flank (remap.c)
 	bool media_keys_swapped;   // KEY_NEXTSONG is the upper skip key, not next (system.c)
+	bool compact_panel;		   // 240x320 V1: compact fonts, padding and status bar
+	bool sgm31324_led;		   // status LED is an SGM31324 RGB controller (led.c)
+	bool headset_switch_idle_one; // jack switch reads 1 with both sockets empty
 } sysinfo_model_t;
 
 // The entry for the name in the file, or NULL when the file says nothing or
