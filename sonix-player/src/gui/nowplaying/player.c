@@ -45,6 +45,7 @@
 #include "src/system/device/led.h"
 #include "src/system/playback/playlist.h"
 #include "src/system/streaming/podcast.h"
+#include "src/system/streaming/podcastauto.h"
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/streaming/podcastsubs.h"
 #include "src/system/streaming/podcaststate.h"
@@ -4107,6 +4108,10 @@ static void handle_track_finished(void) {
 	// for, which is what makes this the cheaper half of the audiobook's version.
 	char path[512];
 	audio_get_current_file(path, sizeof(path));
+	// Release a delete parked when this episode was marked heard near its end.
+	// Auto-advance starts the next file before update_progress() can see a
+	// STOPPED edge for this one, so waiting for that edge would leak the file.
+	podcastauto_on_stopped(path);
 	if (podcast_stop_at_episode_end() && podcastcache_is_episode(path)) {
 		fprintf(stderr, "player: end of the episode; not starting the next\n");
 		refresh_now_playing();
@@ -4247,6 +4252,12 @@ static void update_progress(void) {
 		episode_last_status = state.status;
 		podcaststate_note(state.current_file, state.progress_current_secs, state.progress_total_secs,
 						  episode_changed);
+		// An episode marked heard near the end keeps its file until the
+		// decoder has actually stopped: deleting it earlier risks unlinking
+		// a file the card still has open.
+		if (episode_changed && state.status == AUDIO_STATUS_STOPPED) {
+			podcastauto_on_stopped(state.current_file);
+		}
 	}
 
 	// "Remember track". The decision, and the writing, live in device_state.c:
@@ -4302,6 +4313,20 @@ static bool live_step(int step) {
 	return true;
 }
 
+// A manual next/prev leaves the current file too, but only when the queue
+// actually advanced. Capture the outgoing path BEFORE the transition (after it
+// the decoder has the new file) and pass back the path device_state loaded.
+// At the end of a one-episode queue -- the normal case for a downloaded
+// podcast -- next/prev returns false without loading anything, and the parked
+// delete must stay for a later real stop instead of unlinking the file still
+// being played.
+static void release_parked_podcast_delete(const char *outgoing, const char *incoming) {
+	if (!outgoing || !outgoing[0] || !incoming || !incoming[0] || strcmp(outgoing, incoming) == 0) {
+		return;
+	}
+	podcastauto_on_stopped(outgoing);
+}
+
 void player_screen_prev(void) {
 	if (live_step(-1)) {
 		return;
@@ -4325,10 +4350,15 @@ void player_screen_prev(void) {
 	// back.
 	if (state.progress_current_secs > 3.0) {
 		device_state_seek(0); // far enough in -> restart current track
-	} else if (device_state_prev(NULL, 0)) {
-		refresh_now_playing(); // near the start -> go to previous track
 	} else {
-		device_state_seek(0); // no queue -> just restart
+		char outgoing[512] = {0}, incoming[512] = {0};
+		audio_get_current_file(outgoing, sizeof(outgoing));
+		if (device_state_prev(incoming, sizeof(incoming))) {
+			release_parked_podcast_delete(outgoing, incoming);
+			refresh_now_playing(); // near the start -> go to previous track
+		} else {
+			device_state_seek(0); // no queue -> just restart; keep the parked delete
+		}
 	}
 
 	update_progress();
@@ -4348,7 +4378,10 @@ void player_screen_next(void) {
 		return;
 	}
 
-	if (device_state_next(NULL, 0)) {
+	char outgoing[512] = {0}, incoming[512] = {0};
+	audio_get_current_file(outgoing, sizeof(outgoing));
+	if (device_state_next(incoming, sizeof(incoming))) {
+		release_parked_podcast_delete(outgoing, incoming);
 		refresh_now_playing();
 	}
 	update_progress();
@@ -4400,7 +4433,10 @@ void player_key_next(void) {
 		return;
 	}
 
-	if (device_state_next(NULL, 0)) {
+	char outgoing[512] = {0}, incoming[512] = {0};
+	audio_get_current_file(outgoing, sizeof(outgoing));
+	if (device_state_next(incoming, sizeof(incoming))) {
+		release_parked_podcast_delete(outgoing, incoming);
 		refresh_now_playing();
 	}
 	update_progress();
@@ -4433,10 +4469,15 @@ void player_key_prev(void) {
 
 	if (state.progress_current_secs > 3.0) {
 		device_state_seek(0);
-	} else if (device_state_prev(NULL, 0)) {
-		refresh_now_playing();
 	} else {
-		device_state_seek(0);
+		char outgoing[512] = {0}, incoming[512] = {0};
+		audio_get_current_file(outgoing, sizeof(outgoing));
+		if (device_state_prev(incoming, sizeof(incoming))) {
+			release_parked_podcast_delete(outgoing, incoming);
+			refresh_now_playing();
+		} else {
+			device_state_seek(0); // queue did not move; keep the parked delete
+		}
 	}
 	update_progress();
 }

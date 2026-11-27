@@ -33,6 +33,7 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static podcastdl_state_t state = PODCASTDL_IDLE;
 static long long bytes_done;
 static long long bytes_total;
+static long long job_serial; // grows on every start; guarded by `lock`
 static volatile bool cancel_asked;
 static http_stream_t *active_stream; // guarded by `lock`; NULL outside the body loop
 
@@ -272,6 +273,9 @@ static void write_tags(const job_t *job) {
 	fprintf(f, "feed_image=%s\n", job->image);
 	fprintf(f, "cover_url=%s\n", e->image);
 	fprintf(f, "episode_id=%lld\n", e->id);
+	// podcastauto.c uses this to tell a file we wrote from one the user copied
+	// into the same folder: only marked files may be evicted by the cap.
+	fprintf(f, "downloaded_by=podcastdl\n");
 	bool ok = fclose(f) == 0;
 	if (!ok || rename(tmp, tags) != 0) {
 		remove(tmp);
@@ -357,6 +361,7 @@ bool podcastdl_start(const podcast_episode_t *episode, const char *feed_title, c
 
 	pthread_mutex_lock(&lock);
 	state = PODCASTDL_RUNNING;
+	job_serial++;
 	bytes_done = 0;
 	bytes_total = 0;
 	cancel_asked = false;
@@ -410,3 +415,10 @@ void podcastdl_acknowledge(void) {
 }
 
 bool podcastdl_busy(void) { return podcastdl_state(NULL, NULL) == PODCASTDL_RUNNING; }
+
+long long podcastdl_job(void) {
+	pthread_mutex_lock(&lock);
+	long long id = job_serial;
+	pthread_mutex_unlock(&lock);
+	return id;
+}

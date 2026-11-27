@@ -13,6 +13,7 @@
 #include "src/system/core/utils.h"
 #include "src/system/db/sqlite3.h"
 #include "src/system/library/metadata.h"
+#include "src/system/streaming/podcastauto.h"
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/streaming/podcastdl.h"
 
@@ -525,10 +526,20 @@ void podcaststate_note(const char *path, double seconds, double total, bool forc
 	}
 	bool due = current_dirty &&
 			   (force || current.played != was_played || now_ms() - current_written_ms >= WRITE_EVERY_MS);
+	// Issue #74: the podcast may ask for its kept copy to go as soon as it is
+	// heard. Only the change false -> true counts: replaying an episode that
+	// was already heard must not make its file disappear.
+	bool just_played = current.played && !was_played;
+	char played_path[sizeof(current.path)];
+	long long played_feed = current.feed_id;
+	snprintf(played_path, sizeof(played_path), "%s", current.path);
 	pthread_mutex_unlock(&current_lock);
 
 	if (due) {
 		current_write(false);
+	}
+	if (just_played) {
+		podcastauto_on_played(played_path, played_feed);
 	}
 }
 
@@ -848,6 +859,12 @@ void podcaststate_set_played_episode(const podcast_episode_t *episode, const cha
 	pthread_mutex_unlock(&current_lock);
 	writer_drain();
 	write_now(key, &s);
+	// A feed page has no file to name in its menu: resolve it from the row we
+	// just wrote so a kept download is deleted there too, like the player and
+	// the downloaded-files page do.
+	if (played && s.path[0] && podcastdl_owns(s.path)) {
+		podcastauto_on_played(s.path, episode->feed_id);
+	}
 }
 
 // ---------------------------------------------------------------------------

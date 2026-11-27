@@ -33,6 +33,7 @@
 #include "src/system/playback/device_state.h"
 #include "src/system/playback/playlist.h"
 #include "src/system/streaming/podcast.h"
+#include "src/system/streaming/podcastauto.h"
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/streaming/podcastdl.h"
 #include "src/system/streaming/podcastsubs.h"
@@ -1384,6 +1385,14 @@ static void mark_cb(void *user) {
 		podcaststate_set_played_episode(item, open_feed.image, heard_now);
 	} else {
 		podcaststate_set_played(e->path, heard_now);
+	}
+	if (heard_now && e->path && e->path[0]) {
+		// A kept episode on the downloaded-files page may ask to go as soon
+		// as it is marked heard. A feed-page episode has no path here (its
+		// row is handled inside podcaststate_set_played_episode() above).
+		long long auto_feed = 0;
+		podcastcache_feed_id(e->path, &auto_feed);
+		podcastauto_on_played(e->path, auto_feed);
 	}
 	e->played = heard_now;
 	if (heard_now) {

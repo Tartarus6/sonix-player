@@ -32,6 +32,7 @@
 #include "src/system/core/lang.h"
 #include "src/system/playback/playlist.h"
 #include "src/system/streaming/podcast.h"
+#include "src/system/streaming/podcastauto.h"
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/streaming/podcastdl.h"
 #include "src/system/streaming/podcaststate.h"
@@ -229,6 +230,8 @@ static void busy_hide(void);
 static void prefetch_urgent(const char *wanted_path);
 static bool show_card_now(void);
 static void backfill_start(void);
+static void auto_options_cb(void *user);
+static void build_auto_page(gui_config_t *cfg);
 
 static void submit(const job_t *job) {
 	pthread_mutex_lock(&job_lock);
@@ -2128,14 +2131,115 @@ static void row_menu_cb(lv_event_t *e) {
 		return;
 	}
 
-	// Two one-entry tables instead of one label picked with a ternary: the tool
-	// that collects the strings to translate reads popover_item_t INITIALISERS,
-	// not assignments.
+	// Tables rather than a label picked with a ternary: the tool that collects
+	// the strings to translate reads popover_item_t INITIALISERS, not
+	// assignments.
 	static const popover_item_t FOLLOW[] = {{"podcast_follow", follow_cb, NULL}};
-	static const popover_item_t UNFOLLOW[] = {{"podcast_unfollow", unfollow_cb, NULL}};
+	// Two entries for a podcast already followed: its own options are what
+	// issue #74 asks for, and they sit above the unfollow action.
+	static const popover_item_t FOLLOWED_MENU[] = {
+		{"Podcast options", auto_options_cb, NULL},
+		{"podcast_unfollow", unfollow_cb, NULL},
+	};
 
 	bool followed = podcastsubs_is_followed(result_feeds[menu_row_index].id);
-	popover_show(lv_event_get_current_target(e), followed ? UNFOLLOW : FOLLOW, 1);
+	if (followed) {
+		popover_show(lv_event_get_current_target(e), FOLLOWED_MENU, 2);
+	} else {
+		popover_show(lv_event_get_current_target(e), FOLLOW, 1);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// one podcast's automatic downloads (issue #74)
+//
+// The labels are written in English here rather than as translation tags: tr()
+// returns its argument unchanged when a language file has no entry, so an
+// untranslated build still reads properly. A translator can add these exact
+// strings to a language .ini later without a code change.
+// ---------------------------------------------------------------------------
+
+static lv_obj_t *auto_screen;
+static lv_obj_t *auto_enabled_switch;
+static lv_obj_t *auto_delete_switch;
+static lv_obj_t *auto_pill[4];
+static long long auto_feed_id;
+static int auto_limit_selected;
+
+static const int AUTO_LIMITS[4] = {0, 5, 10, 20};
+
+static void auto_store(void) {
+	podcastauto_opts_t opts;
+	podcastauto_get(auto_feed_id, &opts);
+	opts.enabled = lv_obj_has_state(auto_enabled_switch, LV_STATE_CHECKED);
+	opts.delete_played = lv_obj_has_state(auto_delete_switch, LV_STATE_CHECKED);
+	opts.limit = auto_limit_selected;
+	podcastauto_set(auto_feed_id, &opts);
+}
+
+static void auto_refresh(void) {
+	podcastauto_opts_t opts;
+	podcastauto_get(auto_feed_id, &opts);
+	auto_limit_selected = opts.limit;
+	if (auto_enabled_switch) {
+		if (opts.enabled) {
+			lv_obj_add_state(auto_enabled_switch, LV_STATE_CHECKED);
+		} else {
+			lv_obj_clear_state(auto_enabled_switch, LV_STATE_CHECKED);
+		}
+	}
+	if (auto_delete_switch) {
+		if (opts.delete_played) {
+			lv_obj_add_state(auto_delete_switch, LV_STATE_CHECKED);
+		} else {
+			lv_obj_clear_state(auto_delete_switch, LV_STATE_CHECKED);
+		}
+	}
+	for (int i = 0; i < 4; i++) {
+		settingsrow_pill_active(auto_pill[i], AUTO_LIMITS[i] == opts.limit);
+	}
+}
+
+static void auto_toggle_cb(lv_event_t *e) {
+	(void)e;
+	auto_store();
+	auto_refresh();
+}
+
+static void auto_limit_cb(lv_event_t *e) {
+	auto_limit_selected = (int)(intptr_t)lv_event_get_user_data(e);
+	auto_store();
+	auto_refresh();
+}
+
+static void auto_options_cb(void *user) {
+	(void)user;
+	if (menu_row_index < 0 || menu_row_index >= list_count || !auto_screen) {
+		return;
+	}
+	auto_feed_id = result_feeds[menu_row_index].id;
+	auto_refresh();
+	lv_label_set_text(settingsrow_page_title(auto_screen), result_feeds[menu_row_index].title);
+	switch_screen(auto_screen);
+}
+
+static void build_auto_page(gui_config_t *cfg) {
+	auto_screen = lv_obj_create(NULL);
+	lv_obj_t *container = settingsrow_page(auto_screen, cfg, "Podcast options");
+
+	settingsrow_toggle(container, "Auto-download new episodes", &auto_enabled_switch, auto_toggle_cb);
+	settingsrow_toggle(container, "Delete episodes after they are heard", &auto_delete_switch, auto_toggle_cb);
+
+	lv_obj_t *pills = NULL;
+	settingsrow_pills(container, "Keep at most", &pills);
+	auto_pill[0] = settingsrow_pill_text(pills, "Off", AUTO_LIMITS[0], auto_limit_cb);
+	auto_pill[1] = settingsrow_pill_text(pills, "5", AUTO_LIMITS[1], auto_limit_cb);
+	auto_pill[2] = settingsrow_pill_text(pills, "10", AUTO_LIMITS[2], auto_limit_cb);
+	auto_pill[3] = settingsrow_pill_text(pills, "20", AUTO_LIMITS[3], auto_limit_cb);
+
+	auto_refresh();
+	theme_register_refresh(auto_refresh);
+	switcher_attach_back_gesture(auto_screen);
 }
 
 // ---------------------------------------------------------------------------
@@ -3981,6 +4085,21 @@ static void queue_watch_cb(lv_timer_t *timer) {
 	bool downloading = fetch_want_id != 0;
 	pthread_mutex_unlock(&fetch_lock);
 	podcastcache_set_network_wanted(downloading || waiting_for_episode);
+
+	// Issue #74: the sweep starts when the radio comes up, on the edge rather
+	// than every second. The Wi-Fi transfer owns the card while it is on, so
+	// nothing is written under it. If it was already on at the radio edge,
+	// turning it back off is itself an edge that starts the sweep; the sweep
+	// also watches the flag itself in case it is switched on mid-run.
+	static bool auto_wifi_was_up;
+	static bool auto_transfer_was_on;
+	bool wifi_up = network_up();
+	bool transfer_on = wifitransfer_get_enabled();
+	if (wifi_up && !transfer_on && (!auto_wifi_was_up || auto_transfer_was_on)) {
+		podcastauto_sync();
+	}
+	auto_wifi_was_up = wifi_up;
+	auto_transfer_was_on = transfer_on;
 }
 
 void podcastpage_init(gui_config_t *cfg) {
@@ -4003,6 +4122,7 @@ void podcastpage_init(gui_config_t *cfg) {
 
 	build_search_page(cfg);
 	build_settings_page(cfg);
+	build_auto_page(cfg);
 	podcastcard_init(cfg);
 	podcastopml_init(cfg);
 	dl_build(cfg);

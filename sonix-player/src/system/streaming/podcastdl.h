@@ -66,6 +66,12 @@ void podcastdl_acknowledge(void);
 // True while a download holds the network.
 bool podcastdl_busy(void);
 
+// Monotonic id of the most recently started job (0 before the first one).
+// A second user of this single slot -- such as the automatic podcast sweep --
+// can record it after podcastdl_start() and check it before acknowledging,
+// so it never consumes a result that belongs to the GUI download queue.
+long long podcastdl_job(void);
+
 // Turns a title into a file or folder name the card accepts: the characters
 // FAT forbids go, leading and trailing dots and spaces go, the length is capped
 // on a UTF-8 boundary. `fallback` when nothing is left.
