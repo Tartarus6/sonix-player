@@ -163,6 +163,9 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 - **Wi-Fi** - see the networks around you, connect, forget, and see the details of the one you are on.
 - **Bluetooth headphones and speakers** - pair, connect and forget. The best codec your device supports is chosen by itself, and you can see the list. The volume can be synced with the headphones, and you can rename your paired devices.
+- **Bluetooth PIN and passkey** - devices that ask for a code can be paired: enter a PIN or passkey, confirm a numeric comparison, or show a code for the other device.
+- **Car Mode** - Bluetooth settings can identify the player as a phone to a car head unit, with call and phonebook profiles, or as a normal audio device. Changing it restarts Bluetooth and reconnects the last device.
+- **AVRCP browsing** - a car head unit can read the Artists, Albums and Tracks folders from the local library, move back to the root, and start a track from the list.
 - **AirPods** - battery for each earbud and the case, and noise control (off, noise cancellation, transparency, adaptive). You choose which modes the stem switches between.
 - **Bluetooth receiver** - a phone or a computer connects to the player and plays through it, like a speaker. The codec and the quality of what comes in are shown.
 - **AirPlay** - play from an iPhone, iPad or Mac on the player.

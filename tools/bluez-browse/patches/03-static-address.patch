@@ -1,0 +1,35 @@
+--- a/src/adapter.c
++++ b/src/adapter.c
+@@ -8680,10 +8680,8 @@
+ {
+ 	struct mgmt_cp_set_static_address cp;
+ 
+-	/* dual-mode adapters must have a public address */
+-	if (adapter->supported_settings & MGMT_SETTING_BREDR)
+-		return false;
+-
++	/* HiBy controllers do not carry a burned-in public address.  Always
++	 * derive a stable random static address from STORAGEDIR/addresses. */
+ 	if (!(adapter->supported_settings & MGMT_SETTING_LE))
+ 		return false;
+ 
+@@ -8782,15 +8780,15 @@
+ 	clear_uuids(adapter);
+ 	clear_devices(adapter);
+ 
+-	if (bacmp(&rp->bdaddr, BDADDR_ANY) == 0) {
+-		if (!set_static_addr(adapter)) {
++	if (!(adapter->supported_settings & MGMT_SETTING_LE) ||
++			!set_static_addr(adapter)) {
++		bacpy(&adapter->bdaddr, &rp->bdaddr);
++		if (bacmp(&rp->bdaddr, BDADDR_ANY) == 0) {
+ 			btd_error(adapter->dev_id,
+ 					"No Bluetooth address for index %u",
+ 					adapter->dev_id);
+ 			goto failed;
+ 		}
+-	} else {
+-		bacpy(&adapter->bdaddr, &rp->bdaddr);
+ 		if (!(adapter->supported_settings & MGMT_SETTING_LE))
+ 			adapter->bdaddr_type = BDADDR_BREDR;
+ 		else

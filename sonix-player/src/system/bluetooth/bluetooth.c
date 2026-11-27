@@ -24,7 +24,9 @@
 
 #include "src/system/bluetooth/airpods.h"
 #include "src/system/audio/audio.h"
+#include "src/system/bluetooth/bluetoothd_fallback.h"
 #include "src/system/bluetooth/btlog.h"
+#include "src/system/bluetooth/btplayer.h"
 #include "src/system/bluetooth/btreceiver.h"
 #include "src/system/bluetooth/btstack.h"
 #include "src/system/bluetooth/btvolume.h"
@@ -48,7 +50,16 @@
 #define BT_RFKILL "/sys/class/rfkill/rfkill0/state"
 
 #define BLUETOOTHD_BIN "/usr/libexec/bluetooth/bluetoothd"
+// The firmware's browsing build, kept beside the stock one in its own
+// directory. Both are launched as "bluetoothd" so the name-based stop path in
+// this file sees either of them.
+#define BLUETOOTHD_BROWSE_BIN "/usr/libexec/bluetooth/browse/bluetoothd"
+#define BT_DISABLE_BROWSE_FLAG "/usr/data/disable_bt_browse"
 #define BLUEALSA_BIN "/usr/bin/bluealsa"
+#define OBEXD_BIN "/usr/libexec/bluetooth/obexd"
+#define RFCOMM_BIN "/usr/bin/bluealsa-rfcomm"
+#define OBEX_HOME "/usr/data/obex"
+#define OBEX_SESSION "unix:path=/tmp/obex-session"
 
 #define DBUS_DAEMON_BIN "/usr/bin/dbus-daemon"
 #define DBUS_SYSTEM_CONF "/usr/share/dbus-1/system.conf"
@@ -117,6 +128,7 @@ typedef enum {
 	JOB_CODECS,		  // re-read what the connected sink offers
 	JOB_LDAC_QUALITY, // restart bluealsa so it reads the new --ldac-quality
 	JOB_RECEIVER_PROFILE, // restart bluealsa with or without the A2DP sink
+	JOB_CAR_MODE,	 // restart the stack with the other main.conf
 	JOB_DISCOVERABLE, // arg_int: 1 visible to everyone, 0 not
 	// The name the adapter answers with. Carried in g_local_name rather than in
 	// the job: a name is longer than `text` holds.
@@ -152,6 +164,8 @@ static int queue_head, queue_count;
 static bool g_enabled;
 static bool g_busy;
 static bool g_scanning;
+static bool g_car_mode;			   // phone identity vs ordinary audio device
+static bool g_car_mode_restarting; // set while the worker swaps the stack
 static bool g_discoverable; // what the Bluetooth list page asked for, last
 static int g_seen_count;   // device objects bluez held at the last refresh
 static int g_hidden_count; // ...of which nameless and not audio gear
@@ -218,7 +232,7 @@ static int g_pending_volume = -1; // coalesces a held volume key into one write
 static bt_stream_t g_rx_stream;
 static unsigned g_rx_serial; // moves every time the worker reads the line above
 
-static void post_job(const job_t *job);
+static bool post_job(const job_t *job);
 
 // ---------------------------------------------------------------------------
 // small helpers
@@ -465,6 +479,115 @@ static bool spawn_daemon(const char *path, char *const argv[]) {
 void bluetooth_daemon_debug_on(void) {
 	int sig = SIGUSR2;
 	for_each_process("bluetoothd", send_signal, &sig);
+}
+
+// A car treats a device with HFP + PBAP + MAP as a phone. BlueALSA registers
+// HFP AG for us; obexd supplies the phonebook and message profiles. The stock
+// rootfs ships obexd with its dummy backends, so an empty vcard tree is enough
+// for the head unit to finish its phone connection flow.
+static bool s_phone_profiles_started;
+static volatile bool s_ciev_run;
+
+static void ensure_phone_profiles(void) {
+	if (s_phone_profiles_started || !config_get_bool("bluetooth", "car_mode", true) ||
+		!config_get_bool("bluetooth", "phone_profiles", true)) {
+		return;
+	}
+	s_phone_profiles_started = true;
+
+	const char *dirs[] = {OBEX_HOME, OBEX_HOME "/root", OBEX_HOME "/phonebook",
+						  OBEX_HOME "/phonebook/telecom", OBEX_HOME "/phonebook/telecom/pb",
+						  OBEX_HOME "/phonebook/telecom/ich", OBEX_HOME "/phonebook/telecom/och",
+						  OBEX_HOME "/phonebook/telecom/mch", OBEX_HOME "/phonebook/telecom/cch",
+						  OBEX_HOME "/phonebook/telecom/spd", OBEX_HOME "/phonebook/telecom/fav"};
+	for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+		mkdir(dirs[i], 0700);
+	}
+
+	char *dbus_argv[] = {(char *)"dbus-daemon", (char *)"--session",
+						 (char *)"--address=" OBEX_SESSION, (char *)"--nofork", NULL};
+	spawn_daemon(DBUS_DAEMON_BIN, dbus_argv);
+	sleep_ms(200);
+
+	char *home = getenv("HOME");
+	char *saved = home ? strdup(home) : NULL;
+	setenv("HOME", OBEX_HOME, 1);
+	setenv("DBUS_SESSION_BUS_ADDRESS", OBEX_SESSION, 1);
+	char *obex_argv[] = {(char *)"obexd", (char *)"-n", (char *)"-r", OBEX_HOME "/root", NULL};
+	spawn_daemon(OBEXD_BIN, obex_argv);
+	setenv("HOME", saved ? saved : "/usr/data", 1);
+	free(saved);
+	fprintf(stderr, "bluetooth: phone profiles started (PBAP/MAP)\n");
+}
+
+// Some head units keep A2DP only while the phone reports an active call.
+// bluealsa-rfcomm feeds AT+CIEV indications to the HFP AG; the connection is
+// held open while the device stays connected and released when it leaves.
+static void *hfp_ciev_thread(void *arg) {
+	char mac[BT_MAC_MAX];
+	snprintf(mac, sizeof(mac), "%s", (const char *)arg);
+	free(arg);
+	sleep_ms(1500);
+
+	char dev[BT_MAC_MAX];
+	size_t i = 0;
+	for (; mac[i] && i + 1 < sizeof(dev); i++) {
+		dev[i] = mac[i] == ':' ? '_' : mac[i];
+	}
+	dev[i] = '\0';
+	char path[192];
+	snprintf(path, sizeof(path), "/org/bluealsa/hci0/dev_%s/rfcomm", dev);
+
+	int fds[2];
+	if (pipe(fds) != 0) {
+		return NULL;
+	}
+	pid_t pid = fork();
+	if (pid == 0) {
+		dup2(fds[0], STDIN_FILENO);
+		close(fds[0]);
+		close(fds[1]);
+		logging_child_stdio();
+		execl(RFCOMM_BIN, "bluealsa-rfcomm", path, (char *)NULL);
+		_exit(127);
+	}
+	close(fds[0]);
+	if (pid > 0) {
+		const char *on = "+CIEV:1,1\n+CIEV:5,5\n+CIEV:2,1\n";
+		if (write(fds[1], on, strlen(on)) < 0) {
+			fprintf(stderr, "bluetooth: CIEV failed (rfcomm not up?)\n");
+		} else {
+			fprintf(stderr, "bluetooth: CIEV call-state sent for %s\n", mac);
+		}
+		for (int n = 0; n < 10 && bluetooth_audio_active() && s_ciev_run &&
+			 config_get_bool("bluetooth", "car_mode", true); n++) {
+			sleep_ms(2000);
+			write(fds[1], on, strlen(on));
+		}
+		const char *off = "+CIEV:2,0\n+CIEV:5,0\n+CIEV:1,0\n";
+		write(fds[1], off, strlen(off));
+		kill(pid, SIGTERM);
+		waitpid(pid, NULL, 0);
+	}
+	close(fds[1]);
+	s_ciev_run = false;
+	return NULL;
+}
+
+static void start_hfp_ciev(const char *mac) {
+	if (!config_get_bool("bluetooth", "car_mode", true) ||
+		!config_get_bool("bluetooth", "hfp_call_state", true) || !mac || !mac[0]) {
+		return;
+	}
+	pthread_t tid;
+	char *arg = strdup(mac);
+	s_ciev_run = true;
+	if (arg && pthread_create(&tid, NULL, hfp_ciev_thread, arg) == 0) {
+		pthread_detach(tid);
+		return;
+	}
+	s_ciev_run = false;
+	free(arg);
 }
 
 // The one place a helper is still run and waited for. Only ever with a fixed
@@ -847,6 +970,44 @@ static bool ensure_transport(void) {
 	return false;
 }
 
+// The browsing bring-up is shared between the patched and the stock daemon.
+// The wait covers two conditions with one clock: claiming org.bluez and then
+// finding a controller. Each attempt gets what is left of the same 8000 ms.
+static uint32_t daemon_wait_began;
+
+static bool daemon_wait(int timeout_ms, void *user) {
+	(void)user;
+	daemon_wait_began = now_ms();
+	if (!btstack_wait_service("org.bluez", timeout_ms)) {
+		fprintf(stderr, "bluetooth: bluetoothd did not claim org.bluez\n");
+		return false;
+	}
+	int left = timeout_ms - (int)(now_ms() - daemon_wait_began);
+	if (left < 1) {
+		return false;
+	}
+	// The name on the bus is not the same as a controller bluez can drive: the
+	// Adapter1 interface appears on /org/bluez/hci0 only once it has one.
+	if (!btstack_wait_adapter(left)) {
+		fprintf(stderr, "bluetooth: org.bluez is there but hci0 has no Adapter1\n");
+		return false;
+	}
+	return true;
+}
+
+static bool daemon_spawn(const char *path, char *const argv[], void *user) {
+	(void)user;
+	if (access(path, X_OK) != 0) {
+		return false;
+	}
+	return spawn_daemon(path, argv);
+}
+
+static bool daemon_kill(void *user) {
+	(void)user;
+	return stop_process("bluetoothd");
+}
+
 static bool ensure_bluetoothd(void) {
 	// The firmware's agent has to go before this player's can be the default
 	// one: bluez keeps exactly one, and whichever registered first answers every
@@ -856,33 +1017,42 @@ static bool ensure_bluetoothd(void) {
 		stop_process("bt-agent");
 	}
 
-	if (!process_running("bluetoothd")) {
-		// -E is the experimental interface and -C the SDP compatibility one. Both
-		// are what the firmware starts it with.
-		//
-		// -d only with the Bluetooth log on (btlog.h): every debug line of
-		// bluez, from the profile state machine to the AVDTP negotiation. What
-		// bluetoothd says reaches that log through syslog, which it always
-		// writes to and the log listens on -- so nothing changes about where
-		// its output goes, and with the log off it goes nowhere, as on the
-		// firmware.
-		char *argv[5] = {(char *)"bluetoothd", (char *)"-E", (char *)"-C", NULL, NULL};
-		if (btlog_enabled()) {
-			argv[3] = (char *)"-d";
-		}
-		spawn_daemon(BLUETOOTHD_BIN, argv);
+	if (process_running("bluetoothd") && access(BT_DISABLE_BROWSE_FLAG, F_OK) == 0) {
+		// The user opted out. Whatever daemon is running stays in charge.
+		return daemon_wait(WAIT_BLUETOOTHD_MS, NULL);
+	}
+	if (process_running("bluetoothd")) {
+		// D-Bus activation or firmware init may have started the stock daemon.
+		// The name alone cannot tell which binary it is, so replace it with the
+		// one this session selected. The fallback kills it before starting a
+		// second daemon.
+		stop_process("bluetoothd");
 	}
 
-	if (!btstack_wait_service("org.bluez", WAIT_BLUETOOTHD_MS)) {
-		fprintf(stderr, "bluetooth: bluetoothd did not claim org.bluez\n");
+	// -E (experimental interfaces, which MediaFolder1 needs) and -C are what
+	// the firmware starts bluetoothd with. -d only with the Bluetooth log on:
+	// bluez writes to syslog, which that log listens to, so nothing changes
+	// about where its output goes. Both binaries keep the basename bluetoothd.
+	bt_daemon_fallback_t fallback = {
+		.patched_path = BLUETOOTHD_BROWSE_BIN,
+		.stock_path = BLUETOOTHD_BIN,
+		.disable_flag = BT_DISABLE_BROWSE_FLAG,
+		.conf = config_get_bool("bluetooth", "car_mode", true)
+					? "/etc/bluetooth/main.conf" : "/etc/bluetooth/main.audio.conf",
+		.debug = btlog_enabled(),
+		.deadline_ms = WAIT_BLUETOOTHD_MS,
+		.spawn = daemon_spawn,
+		.wait = daemon_wait,
+		.kill = daemon_kill,
+		.user = NULL,
+	};
+	bt_up_t up = bt_daemon_bring_up(&fallback);
+	if (up == BT_UP_NONE) {
+		fprintf(stderr, "bluetooth: no bluetoothd came up\n");
 		return false;
 	}
-	// The name on the bus is not the same as a controller bluez can drive: the
-	// Adapter1 interface appears on /org/bluez/hci0 only once it has one.
-	if (!btstack_wait_adapter(WAIT_BLUETOOTHD_MS)) {
-		fprintf(stderr, "bluetooth: org.bluez is there but hci0 has no Adapter1\n");
-		return false;
-	}
+	fprintf(stderr, "bluetooth: bluetoothd up (%s browsing)\n",
+			up == BT_UP_PATCHED ? "patched" : "stock");
 	return true;
 }
 
@@ -1222,16 +1392,27 @@ static bool ensure_bluealsa(void) {
 		char codecs[BT_MAX_CODECS][BT_CODEC_MAX];
 		int codec_count = codecs_to_ask_for(codecs, BT_MAX_CODECS);
 
-		char *argv[11 + BT_MAX_CODECS * 2];
+		// A car expects a phone, not a bare A2DP player. Registering the HFP
+		// audio gateway gives bluez the 0x111F UUID and the Telephony service
+		// bit in the class of device, which is what makes the head unit run
+		// its phone connection flow instead of closing the media link.
+		bool hfp_ag = config_get_bool("bluetooth", "car_mode", true) && bluealsa_knows_option("hfp-ag");
+
+		char *argv[13 + BT_MAX_CODECS * 2];
 		int at = 0;
 		argv[at++] = (char *)"bluealsa";
 		argv[at++] = (char *)"-p";
 		argv[at++] = (char *)"a2dp-source";
+		if (hfp_ag) {
+			argv[at++] = (char *)"-p";
+			argv[at++] = (char *)"hfp-ag";
+		}
 		if (want_sink) {
 			argv[at++] = (char *)"-p";
 			argv[at++] = (char *)"a2dp-sink";
 		}
-		fprintf(stderr, "bluetooth: bluealsa with the A2DP source%s\n", want_sink ? " and sink" : " only");
+		fprintf(stderr, "bluetooth: bluealsa with the A2DP source%s%s\n", hfp_ag ? " and HFP AG" : "",
+				want_sink ? " and sink" : "");
 		argv[at++] = (char *)"--a2dp-volume";
 		argv[at++] = keepalive;
 		if (rt) {
@@ -1306,6 +1487,11 @@ static void read_local_name(void) {
 }
 
 bool bluetooth_available(void) {
+#ifdef HOST_BUILD
+	if (getenv("SONIX_MOCK_BT")) {
+		return true;
+	}
+#endif
 	// A device with Bluetooth has the radio switch, or a controller already
 	// attached, or the loader that attaches one. A device without has none.
 	return access("/sys/class/rfkill/rfkill0", F_OK) == 0 || access("/sys/class/bluetooth", F_OK) == 0 ||
@@ -1535,6 +1721,26 @@ static void refresh_audio_state(void) {
 		read_sink_rate(NULL);
 	}
 	apply_output_routing();
+
+	// With nothing playing, no PCM client ever opens and BlueALSA never sends
+	// AVDTP START. A head unit that sees an OPEN but silent stream closes it
+	// after a few seconds, so hold the transport with a silent PCM until real
+	// playback takes it over. audio_play() stops this before opening its PCM.
+	// Feeding CIEV indications makes the head unit see an active call. Some
+	// car kits keep A2DP only while that state is present.
+	if (sink) {
+		start_hfp_ciev(mac);
+	}
+
+	bool idle_keep = config_get_bool("bluetooth", "idle_stream_keepalive", true);
+	if (sink && idle_keep && audio_get_status() == AUDIO_STATUS_STOPPED) {
+		char pcm[128];
+		bluetooth_output_pcm(pcm, (int)sizeof(pcm));
+		audio_bt_keepalive_start(pcm, bluetooth_sink_rate());
+	} else if (!sink) {
+		audio_bt_keepalive_stop();
+	}
+
 	do_read_codecs();
 }
 
@@ -2222,6 +2428,7 @@ static bool bring_stack_up(void) {
 		// The PCM objects that already existed were never announced to a
 		// connection that had not opened yet.
 		btstack_refresh_audio();
+		ensure_phone_profiles();
 	} else {
 		// Not a failed bring-up. The radio, bluez and the device list are all
 		// up, so the settings page works and headphones can still be paired --
@@ -2313,7 +2520,11 @@ static void bring_stack_down(bool deliberate) {
 
 	long freed = process_rss_kb("bluealsa") + process_rss_kb("bluetoothd") + process_rss_kb("bt-agent");
 
+	s_ciev_run = false;
+	stop_process("bluealsa-rfcomm");
 	stop_process("bluealsa");
+	stop_process("obexd");
+	s_phone_profiles_started = false;
 
 	// The adapter is powered down while bluetoothd is still there to do it --
 	// which is what tells the controller to stop advertising and to close its
@@ -2357,6 +2568,7 @@ void bluetooth_power_down_stack(void) {
 	// The same order as bring_stack_down(), minus everything that needs the bus:
 	// with the switch off there is no connection open and nothing connected.
 	stop_process("bluealsa");
+	stop_process("obexd");
 	stop_process("bluetoothd");
 	stop_process("bt-agent");
 	hci_down();
@@ -2878,9 +3090,9 @@ static bool queue_has(job_type_t type) {
 	return false;
 }
 
-static void post_job(const job_t *job) {
+static bool post_job(const job_t *job) {
 	pthread_mutex_lock(&lock);
-	bool duplicate = job->type == JOB_REFRESH && queue_has(JOB_REFRESH);
+	bool duplicate = ((job->type == JOB_REFRESH || job->type == JOB_CAR_MODE) && queue_has(job->type));
 	bool queued = duplicate || queue_count < JOB_QUEUE_LEN;
 	if (!duplicate && queued) {
 		queue[(queue_head + queue_count) % JOB_QUEUE_LEN] = *job;
@@ -2892,6 +3104,7 @@ static void post_job(const job_t *job) {
 	if (!queued) {
 		fprintf(stderr, "bluetooth: job queue full (%d); dropping a job of type %d\n", JOB_QUEUE_LEN, (int)job->type);
 	}
+	return queued;
 }
 
 // Stops bluealsa and starts it again with the current options, then asks the
@@ -3098,6 +3311,19 @@ static void *bluetooth_worker(void *arg) {
 				break;
 			}
 
+			case JOB_CAR_MODE:
+				bring_stack_down(false);
+				bring_stack_up();
+				// bluetoothd replaced its media player objects during the restart.
+				btplayer_reset();
+				reconnect_last();
+				pthread_mutex_lock(&lock);
+				g_car_mode_restarting = false;
+				g_busy = false;
+				pthread_mutex_unlock(&lock);
+				refresh_devices();
+				break;
+
 			case JOB_DISCOVERABLE:
 				btstack_set_discoverable(job.arg_int != 0);
 				break;
@@ -3184,6 +3410,7 @@ void bluetooth_init(void) {
 
 	g_enabled = config_get_int("wireless", "bluetooth", 0) != 0;
 	g_volume_sync = config_get_int("wireless", "bt_volume_sync", 1) != 0;
+	g_car_mode = config_get_bool("bluetooth", "car_mode", true);
 
 	// Before anything asks for it. Bring-up reads it too, but the settings page
 	// shows the name with the radio off, and until this the answer was the
@@ -3214,6 +3441,11 @@ void bluetooth_init(void) {
 }
 
 bool bluetooth_get_enabled(void) {
+#ifdef HOST_BUILD
+	if (getenv("SONIX_MOCK_BT")) {
+		return true;
+	}
+#endif
 	pthread_mutex_lock(&lock);
 	bool on = g_enabled;
 	pthread_mutex_unlock(&lock);
@@ -3346,6 +3578,19 @@ int bluetooth_get_paired(bt_device_t *out, int max) {
 	if (!out || max <= 0) {
 		return 0;
 	}
+#ifdef HOST_BUILD
+	// The simulator has no bluez, so the Bluetooth page and its device menu
+	// would be empty. One known car head unit stands in for a real pairing.
+	if (getenv("SONIX_MOCK_BT")) {
+		memset(out, 0, sizeof(out[0]));
+		snprintf(out[0].mac, sizeof(out[0].mac), "%s", "28:0F:EB:AC:53:EA");
+		snprintf(out[0].name, sizeof(out[0].name), "%s", "Media Display");
+		out[0].paired = true;
+		out[0].connected = true;
+		out[0].trusted = true;
+		return 1;
+	}
+#endif
 	pthread_mutex_lock(&lock);
 	int count = g_paired_count < max ? g_paired_count : max;
 	memcpy(out, g_paired, sizeof(bt_device_t) * (size_t)count);
@@ -3415,6 +3660,41 @@ static void post_device_job(job_type_t type, const char *mac) {
 }
 
 void bluetooth_pair(const char *mac) { post_device_job(JOB_PAIR, mac); }
+
+// Pairing prompts (agent requests surfaced to UI)
+static char pin_device[BT_MAC_MAX];
+static char pin_display[32];
+
+bool bluetooth_pin_pending(void) { return btstack_pair_request_pending(); }
+
+const char *bluetooth_pin_pending_device(void) {
+	char dev[BT_MAC_MAX], pk[32];
+	btstack_pair_request_info(dev, sizeof(dev), pk, sizeof(pk));
+	snprintf(pin_device, sizeof(pin_device), "%s", dev);
+	return pin_device;
+}
+
+int bluetooth_pin_mode(void) {
+	switch (btstack_pair_request_type()) {
+	case BTSTACK_PAIR_PIN: return 0;
+	case BTSTACK_PAIR_PASSKEY: return 1;
+	case BTSTACK_PAIR_CONFIRM: return 2;
+	case BTSTACK_PAIR_DISPLAY: return 3;
+	case BTSTACK_PAIR_AUTHORIZE: return 4;
+	default: return -1;
+	}
+}
+
+const char *bluetooth_pin_display(void) {
+	char dev[BT_MAC_MAX], pk[32];
+	btstack_pair_request_info(dev, sizeof(dev), pk, sizeof(pk));
+	snprintf(pin_display, sizeof(pin_display), "%s", pk);
+	return pin_display;
+}
+
+void bluetooth_submit_pin(const char *pin) { btstack_pair_request_reply(pin); }
+
+void bluetooth_cancel_pin(void) { btstack_pair_request_cancel(); }
 void bluetooth_connect(const char *mac) { post_device_job(JOB_CONNECT, mac); }
 void bluetooth_disconnect(const char *mac) { post_device_job(JOB_DISCONNECT, mac); }
 void bluetooth_forget(const char *mac) { post_device_job(JOB_FORGET, mac); }
@@ -3628,6 +3908,52 @@ void bluetooth_set_ldac_quality(const char *mode) {
 	// worker like everything else that touches the stack.
 	job_t job = {.type = JOB_LDAC_QUALITY};
 	post_job(&job);
+}
+
+bool bluetooth_car_mode_get(void) {
+	pthread_mutex_lock(&lock);
+	bool on = g_car_mode;
+	pthread_mutex_unlock(&lock);
+	return on;
+}
+
+bool bluetooth_car_mode_restarting(void) {
+	pthread_mutex_lock(&lock);
+	bool busy = g_car_mode_restarting;
+	pthread_mutex_unlock(&lock);
+	return busy;
+}
+
+void bluetooth_car_mode_set(bool on) {
+	if (bluetooth_car_mode_get() == on) {
+		return;
+	}
+	config_set_bool("bluetooth", "car_mode", on);
+	config_save();
+
+	pthread_mutex_lock(&lock);
+	g_car_mode = on;
+	bool enabled = g_enabled;
+	pthread_mutex_unlock(&lock);
+
+	// With the radio off there is no stack to swap. The new class is read at
+	// the next power-on; do not bring the radio up behind the UI's back.
+	if (!enabled) {
+		return;
+	}
+
+	pthread_mutex_lock(&lock);
+	g_car_mode_restarting = true;
+	g_busy = true;
+	pthread_mutex_unlock(&lock);
+
+	job_t job = {.type = JOB_CAR_MODE};
+	if (!post_job(&job)) {
+		pthread_mutex_lock(&lock);
+		g_car_mode_restarting = false;
+		g_busy = false;
+		pthread_mutex_unlock(&lock);
+	}
 }
 
 void bluetooth_set_receiver_profile(bool on) {

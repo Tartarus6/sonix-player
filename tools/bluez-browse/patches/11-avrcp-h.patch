@@ -1,0 +1,36 @@
+--- a/profiles/audio/avrcp.h
++++ b/profiles/audio/avrcp.h
+@@ -101,6 +101,16 @@
+ 	bool (*pause) (void *user_data);
+ 	bool (*next) (void *user_data);
+ 	bool (*previous) (void *user_data);
++
++	/* AVRCP 1.5 target browsing callbacks.  All are optional: a player
++	 * that does not provide them is announced as non-browsable. */
++	uint32_t (*get_total) (uint32_t folder_id, void *user_data);
++	GSList *(*list_items) (uint32_t folder_id, uint32_t start,
++					uint32_t end, uint32_t *total, void *user_data);
++	bool (*get_item) (uint64_t uid, char **name, uint8_t *type,
++								void *user_data);
++	bool (*play_item) (uint64_t uid, void *user_data);
++	void (*reset_browse) (void *user_data);
+ };
+ 
+ int avrcp_set_volume(struct btd_device *dev, uint8_t volume, bool notify);
+@@ -114,6 +124,16 @@
+ void avrcp_player_event(struct avrcp_player *player, uint8_t id,
+ 							const void *data);
+ 
++/* Notify the CT that the browsed folder contents changed. */
++void avrcp_player_browsing_changed(struct avrcp_player *player);
++
++/* Release per-player browsing state (called on disconnect/ChangePath). */
++void avrcp_player_reset_browse(struct avrcp_player *player);
++
++/* Deliver the asynchronous GetFolderItems result to the AVRCP target. */
++void avrcp_tg_browse_done(struct avrcp_player *player, GSList *items,
++								uint32_t total);
++
+ 
+ size_t avrcp_handle_vendor_reject(uint8_t *code, uint8_t *operands);
+ size_t avrcp_browsing_general_reject(uint8_t *operands);

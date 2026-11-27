@@ -2,14 +2,18 @@
 
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "src/gui/shell/gui.h"
+#include "src/gui/nowplaying/player.h"
 #include "src/system/audio/audio.h"
 #include "src/system/bluetooth/bluetooth.h"
+#include "src/system/bluetooth/btbrowser.h"
 #include "src/system/bluetooth/dbuslite.h"
+#include "src/system/library/library.h"
 #include "src/system/playback/device_state.h"
 
 #define PLAYER_PATH "/org/mpris/MediaPlayer2"
@@ -34,6 +38,7 @@ static pthread_t worker;
 static bool worker_started;
 static volatile bool stopping;
 static volatile bool registered;
+static volatile bool reconnect_requested;
 
 static dbus_conn_t *conn;
 
@@ -73,6 +78,12 @@ bool btplayer_command_is_duplicate(void) {
 // ---------------------------------------------------------------------------
 
 static const char *status_now(void) {
+	// During the silent keep-alive we are streaming (START was sent and the
+	// transport is ACTIVE). Telling the car "Stopped" makes some head units
+	// close the A2DP link a few seconds later, so report the stream as playing.
+	if (audio_bt_keepalive_active()) {
+		return "Playing";
+	}
 	switch (audio_get_status()) {
 	case AUDIO_STATUS_PLAYING:
 		return "Playing";
@@ -167,9 +178,138 @@ static void write_all_properties(dbus_writer_t *w) {
 	// nothing to answer with.
 	dbus_w_dict_bool(w, "CanSeek", false);
 	dbus_w_dict_bool(w, "CanControl", true);
+	// Bluez only builds /Filesystem and answers browsing commands when the
+	// player advertises this. AVRCP browsing is implemented in btbrowser.c.
+	dbus_w_dict_bool(w, "Browsable", true);
 	w_dict_metadata(w, &t);
 	dbus_w_array_end(w, &a);
 }
+
+// ---------------------------------------------------------------------------
+// The library behind /Filesystem
+// ---------------------------------------------------------------------------
+
+typedef struct {
+	library_index_t *flat; // the all-tracks handle behind /Filesystem/Tracks
+} browse_state_t;
+
+static browse_state_t browse_state;
+
+typedef struct {
+	browse_item_t *out;
+	int count;
+	int at;
+	bool key_from_name; // artists and albums carry their SQL key in `name`
+} browse_window_t;
+
+static bool browse_row(const char *name, const char *path, const char *artist, void *user) {
+	browse_window_t *w = user;
+	if (w->at >= w->count) {
+		return false;
+	}
+	browse_item_t *row = &w->out[w->at++];
+	snprintf(row->name, sizeof(row->name), "%s", name ? name : "");
+	// The raw library key is the SQL filter value for artists and albums, and
+	// the real file path for tracks. btbrowser.c only cuts it for display.
+	snprintf(row->value, sizeof(row->value), "%s",
+			 w->key_from_name ? (name ? name : "") : (path ? path : ""));
+	snprintf(row->artist, sizeof(row->artist), "%s", artist ? artist : "");
+	return true;
+}
+
+static int browse_refresh(void *user) {
+	browse_state_t *s = user;
+	if (s->flat && library_index_stale(s->flat)) {
+		library_index_close(s->flat);
+		s->flat = NULL;
+	}
+	if (!s->flat) {
+		s->flat = library_index_open(LIBRARY_LIST_TRACKS, LIBRARY_FILTER_NONE, NULL, LIBRARY_ORDER_DEFAULT, false);
+	}
+	return s->flat ? library_index_count(s->flat) : -1;
+}
+
+static int browse_window(void *user, int offset, int count, browse_item_t *out) {
+	browse_state_t *s = user;
+	if (!s->flat || library_index_stale(s->flat)) {
+		return -1;
+	}
+	browse_window_t w = {out, count, 0};
+	int n = library_index_window(s->flat, offset, count, browse_row, &w);
+	return n == 0 && library_index_stale(s->flat) ? -1 : n;
+}
+
+static void browse_close(void *user) {
+	browse_state_t *s = user;
+	if (s->flat) {
+		library_index_close(s->flat);
+		s->flat = NULL;
+	}
+}
+
+static int browse_list(void *user, browse_kind_t kind, browse_filter_t filter, const char *value, int offset,
+					   int count, browse_item_t *out, int *total) {
+	(void)user;
+	library_list_t list = LIBRARY_LIST_TRACKS;
+	if (kind == BROWSE_KIND_ARTISTS) {
+		list = LIBRARY_LIST_ARTISTS;
+	} else if (kind == BROWSE_KIND_ALBUMS) {
+		list = LIBRARY_LIST_ALBUMS;
+	}
+	library_filter_t f = LIBRARY_FILTER_NONE;
+	if (filter == BROWSE_FILTER_ARTIST) {
+		f = LIBRARY_FILTER_ARTIST;
+	} else if (filter == BROWSE_FILTER_ALBUM) {
+		f = LIBRARY_FILTER_ALBUM;
+	}
+
+	library_index_t *ix = library_index_open(list, f, value, LIBRARY_ORDER_DEFAULT, false);
+	if (!ix) {
+		return -1;
+	}
+	if (total) {
+		*total = library_index_count(ix);
+	}
+
+	int n = 0;
+	if (count > 0 && out) {
+		browse_window_t w = {out, count, 0, list != LIBRARY_LIST_TRACKS};
+		n = library_index_window(ix, offset, count, browse_row, &w);
+		if (n == 0 && library_index_stale(ix)) {
+			n = -1;
+		}
+	}
+	library_index_close(ix);
+	return n;
+}
+
+// The GUI owns the player. A queued job carries its own copy of the path: the
+// caller's row is reused as soon as the browse reply is written.
+static void browse_play_on_gui(void *user) {
+	char *path = user;
+	player_play_file(path);
+	free(path);
+}
+
+static void browse_play(const char *path, void *user) {
+	(void)user;
+	char *copy = strdup(path);
+	if (!copy) {
+		return;
+	}
+	if (!gui_post(browse_play_on_gui, copy)) {
+		free(copy);
+	}
+}
+
+static const bt_browser_provider_t browser_provider = {
+	.user = &browse_state,
+	.refresh = browse_refresh,
+	.window = browse_window,
+	.close = browse_close,
+	.play = browse_play,
+	.list = browse_list,
+};
 
 // ---------------------------------------------------------------------------
 // Serving the object
@@ -207,7 +347,11 @@ static void run_command(const char *member) {
 }
 
 static void on_call(dbus_conn_t *c, const dbus_msg_t *m, void *user) {
-	(void)user;
+	// MediaFolder1 and MediaItem1 are served on the same connection as MPRIS.
+	// The browser declines everything else, including the player's own object.
+	if (btbrowser_on_call(c, m, user)) {
+		return;
+	}
 
 	if (strcmp(m->interface, PROPS_IFACE) == 0) {
 		if (strcmp(m->member, "GetAll") == 0) {
@@ -228,6 +372,10 @@ static void on_call(dbus_conn_t *c, const dbus_msg_t *m, void *user) {
 				dbus_w_variant_string(w, status_now());
 			} else if (strcmp(prop, "LoopStatus") == 0) {
 				dbus_w_variant_string(w, "None");
+			} else if (strcmp(prop, "Position") == 0) {
+				// MPRIS milliseconds are int64; answering bool here makes
+				// BlueZ reject the whole player.
+				dbus_w_variant_i64(w, 0);
 			} else if (strcmp(prop, "CanSeek") == 0 || strcmp(prop, "Shuffle") == 0) {
 				dbus_w_variant_bool(w, false);
 			} else {
@@ -244,6 +392,25 @@ static void on_call(dbus_conn_t *c, const dbus_msg_t *m, void *user) {
 					   "this player does not accept writes");
 			return;
 		}
+	}
+
+	if (strcmp(m->interface, PLAYER_IFACE) == 0 && strcmp(m->member, "OpenUri") == 0) {
+		dbus_reader_t r;
+		dbus_reader_init(&r, m);
+		char uri[1024];
+		if (!dbus_r_string(&r, uri, sizeof(uri))) {
+			dbus_error(c, m, "org.freedesktop.DBus.Error.InvalidArgs", "bad uri");
+			return;
+		}
+		const char *path = uri;
+		if (strncmp(path, "file://", 7) == 0) {
+			path += 7;
+		}
+		fprintf(stderr, "btplayer: OpenUri %s\n", path);
+		browse_play(path, NULL);
+		dbus_reply_begin(c, m, "");
+		dbus_reply_send(c);
+		return;
 	}
 
 	if (strcmp(m->interface, PLAYER_IFACE) == 0) {
@@ -317,6 +484,7 @@ static void teardown(void) {
 		dbus_w_path(w, PLAYER_PATH);
 		dbus_call_send(conn, 2000, NULL, 0);
 	}
+	btbrowser_shutdown();
 	dbus_disconnect(conn);
 	conn = NULL;
 	registered = false;
@@ -338,6 +506,12 @@ static void *worker_func(void *unused) {
 			continue;
 		}
 
+		if (reconnect_requested) {
+			reconnect_requested = false;
+			fprintf(stderr, "btplayer: re-registering after stack restart\n");
+			teardown();
+		}
+
 		if (conn && !dbus_alive(conn)) {
 			fprintf(stderr, "btplayer: the bus dropped; reconnecting\n");
 			teardown();
@@ -356,6 +530,7 @@ static void *worker_func(void *unused) {
 				continue;
 			}
 			printf("btplayer: registered with bluez on %s\n", BLUEZ_ADAPTER);
+			btbrowser_init(conn, &browser_provider);
 		}
 
 		// What changed since last time, and only that.
@@ -370,6 +545,7 @@ static void *worker_func(void *unused) {
 		track_now(&t);
 		if (strcmp(t.id, sent_track) != 0) {
 			snprintf(sent_track, sizeof(sent_track), "%s", t.id);
+			printf("btplayer: metadata -> '%s' / '%s'\n", t.title, t.artist);
 			emit_metadata(&t);
 		}
 
@@ -391,6 +567,10 @@ void btplayer_init(void) {
 	}
 	worker_started = true;
 	printf("thread: btplayer runs in the background\n");
+}
+
+void btplayer_reset(void) {
+	reconnect_requested = true;
 }
 
 void btplayer_stop(void) {

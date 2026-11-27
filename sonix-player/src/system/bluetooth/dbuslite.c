@@ -56,6 +56,8 @@ static void w_pad(dbus_writer_t *w, size_t align) {
 	}
 }
 
+void dbus_w_pad(dbus_writer_t *w, size_t align) { w_pad(w, align ? align : 1); }
+
 static void w_raw(dbus_writer_t *w, const void *data, size_t len) {
 	if (w->used + len > sizeof(w->buf)) {
 		w->overflow = true;
@@ -208,6 +210,11 @@ void dbus_w_variant_u16(dbus_writer_t *w, uint16_t value) {
 void dbus_w_variant_u32(dbus_writer_t *w, uint32_t value) {
 	w_signature(w, "u");
 	dbus_w_u32(w, value);
+}
+
+void dbus_w_variant_i64(dbus_writer_t *w, int64_t value) {
+	w_signature(w, "x");
+	dbus_w_i64(w, value);
 }
 
 // ---------------------------------------------------------------------------

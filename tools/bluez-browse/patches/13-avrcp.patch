@@ -1,0 +1,426 @@
+--- a/profiles/audio/avrcp.c
++++ b/profiles/audio/avrcp.c
+@@ -63,6 +63,9 @@
+ 
+ #include "avctp.h"
+ #include "avrcp.h"
++#include "avrcp-tg-browse.h"
++#include "avctp-defer.h"
++#include "tg-pending.h"
+ #include "control.h"
+ #include "player.h"
+ #include "transport.h"
+@@ -279,6 +282,14 @@
+ 	uint8_t transaction;
+ 	uint8_t transaction_events[AVRCP_EVENT_LAST + 1];
+ 	struct pending_pdu *pending_pdu;
++
++	/* AVRCP target browsing state */
++	GSList *tg_pending;
++	struct avctp_defer defer;
++	uint16_t tg_uid_counter;
++	uint32_t tg_folder;
++	uint32_t tg_start;
++	uint32_t tg_end;
+ };
+ 
+ struct passthrough_handler {
+@@ -1782,6 +1793,9 @@
+ 	return AVC_CTYPE_REJECTED;
+ }
+ 
++static uint8_t tg_handle_play_item(struct avrcp *session,
++				struct avrcp_header *pdu, uint8_t transaction);
++
+ static const struct control_pdu_handler control_handlers[] = {
+ 		{ AVRCP_GET_CAPABILITIES, AVC_CTYPE_STATUS,
+ 					avrcp_handle_get_capabilities },
+@@ -1815,6 +1829,7 @@
+ 					avrcp_handle_abort_continuing },
+ 		{ AVRCP_SET_ADDRESSED_PLAYER, AVC_CTYPE_CONTROL,
+ 					avrcp_handle_set_addressed_player },
++		{ AVRCP_PLAY_ITEM, AVC_CTYPE_CONTROL, tg_handle_play_item },
+ 		{ },
+ };
+ 
+@@ -1987,12 +2002,326 @@
+ 	pdu->param_len = htons(1);
+ }
+ 
++
++/* ------------------------------------------------------------------ */
++/* AVRCP 1.5 target browsing                                           */
++/*                                                                     */
++/* Browsing replies are written into the AVCTP buffer in place.         */
++/* GetFolderItems uses the deferred reply API: the handler returns 0    */
++/* and avctp_send_browsing_rsp() is called when the media layer is done. */
++/* ------------------------------------------------------------------ */
++
++static struct avrcp_player *tg_player(struct avrcp *session)
++{
++	return session->target != NULL ? session->target->player : NULL;
++}
++
++static void tg_write_rsp(struct avrcp_browsing_header *pdu,
++					const uint8_t *buf, size_t len)
++{
++	if (len > AVRCP_PDU_MTU)
++		len = AVRCP_PDU_MTU;
++
++	memcpy(pdu->params, buf, len);
++	pdu->param_len = htons(len);
++}
++
++static void tg_status_rsp(struct avrcp_browsing_header *pdu, uint8_t status)
++{
++	uint8_t buf[8];
++	size_t len;
++
++	len = tg_pdu_status(buf, sizeof(buf), pdu->pdu_id, status);
++	tg_write_rsp(pdu, buf, len);
++}
++
++static void tg_set_browsed_player(struct avrcp *session,
++			struct avrcp_browsing_header *pdu, uint8_t transaction)
++{
++	struct avrcp_player *player = tg_player(session);
++	uint8_t buf[64];
++	size_t len;
++	uint32_t total = 0;
++
++	if (player == NULL || player->cb->get_total == NULL) {
++		tg_status_rsp(pdu, TG_STATUS_PLAYER_NOT_BROWSABLE);
++		return;
++	}
++
++	/* A fresh SetBrowsedPlayer resets the breadcrumb depth to zero and
++	 * invalidates every reply that was still pending for this player. */
++	session->tg_folder = 0;
++	session->tg_uid_counter++;
++	total = player->cb->get_total(session->tg_folder, player->user_data);
++	len = tg_pdu_set_browsed_player(buf, sizeof(buf),
++			session->tg_uid_counter, 0, total);
++
++	if (player->cb->reset_browse != NULL)
++		player->cb->reset_browse(player->user_data);
++	tg_pending_drop_player(&session->tg_pending, player->id);
++	avctp_defer_free(&session->defer);
++
++	tg_write_rsp(pdu, buf, len);
++}
++
++static void tg_get_folder_items(struct avrcp *session,
++			struct avrcp_browsing_header *pdu, uint8_t transaction)
++{
++	struct avrcp_player *player = tg_player(session);
++	uint8_t scope;
++	uint32_t start, end;
++
++	if (ntohs(pdu->param_len) < 10) {
++		tg_status_rsp(pdu, TG_STATUS_INVALID_PARAM);
++		return;
++	}
++
++	scope = pdu->params[0];
++
++	/* The stock handler still serves the media player list scope. */
++	if (scope == TG_SCOPE_PLAYER_LIST) {
++		avrcp_handle_get_folder_items(session, pdu, transaction);
++		return;
++	}
++
++	if (!tg_check_scope(scope) || player == NULL ||
++			player->cb->list_items == NULL) {
++		tg_status_rsp(pdu, TG_STATUS_PLAYER_NOT_BROWSABLE);
++		return;
++	}
++
++	start = tg_get_be32(pdu->params + 1);
++	end = tg_get_be32(pdu->params + 5);
++	if (end < start) {
++		tg_status_rsp(pdu, TG_STATUS_INVALID_PARAM);
++		return;
++	}
++
++	/* Never let a stale reply from an older transaction overtake this one. */
++	tg_pending_drop_stale(&session->tg_pending, transaction);
++	if (tg_pending_is_current(session->tg_pending, transaction)) {
++		tg_status_rsp(pdu, TG_STATUS_INTERNAL_ERROR);
++		return;
++	}
++
++	session->tg_start = start;
++	session->tg_end = end;
++	session->tg_pending = g_slist_prepend(session->tg_pending,
++			tg_pending_new(transaction, player->id, pdu->pdu_id));
++
++	avctp_defer_save(&session->defer, transaction, (uint8_t *) pdu,
++			AVRCP_BROWSING_HEADER_LENGTH + ntohs(pdu->param_len));
++
++	player->cb->list_items(session->tg_folder, start, end, NULL,
++							player->user_data);
++
++	/* Zero tells avctp.c that the response will be sent asynchronously. */
++	pdu->param_len = htons(0);
++}
++
++static void tg_change_path(struct avrcp *session,
++			struct avrcp_browsing_header *pdu, uint8_t transaction)
++{
++	struct avrcp_player *player = tg_player(session);
++	uint8_t buf[16];
++	uint64_t uid;
++	size_t len;
++	uint32_t total = 0;
++
++	if (ntohs(pdu->param_len) < 11 || player == NULL ||
++			player->cb->get_total == NULL) {
++		tg_status_rsp(pdu, TG_STATUS_INVALID_PARAM);
++		return;
++	}
++
++	uid = ((uint64_t) tg_get_be32(pdu->params + 3) << 32) |
++						tg_get_be32(pdu->params + 7);
++	session->tg_folder = (uint32_t) uid;
++	session->tg_uid_counter++;
++	total = player->cb->get_total(session->tg_folder, player->user_data);
++	len = tg_pdu_change_path(buf, sizeof(buf), total);
++
++	/* Changing folder invalidates the previous cached window.  The media
++	 * layer keeps its UID cache intact across this operation. */
++	if (player->cb->reset_browse != NULL)
++		player->cb->reset_browse(player->user_data);
++	tg_pending_drop_player(&session->tg_pending, player->id);
++
++	tg_write_rsp(pdu, buf, len);
++}
++
++static void tg_get_item_attributes(struct avrcp *session,
++			struct avrcp_browsing_header *pdu, uint8_t transaction)
++{
++	struct avrcp_player *player = tg_player(session);
++	uint8_t buf[300], attrs[256];
++	uint64_t uid;
++	size_t len, attrlen = 0;
++	char *name = NULL;
++	uint8_t type = TG_ITEM_SONG;
++	bool has_name;
++
++	if (ntohs(pdu->param_len) < 9 || player == NULL ||
++			player->cb->get_item == NULL) {
++		tg_status_rsp(pdu, TG_STATUS_INVALID_PARAM);
++		return;
++	}
++
++	uid = ((uint64_t) tg_get_be32(pdu->params + 1) << 32) |
++						tg_get_be32(pdu->params + 5);
++	if (!player->cb->get_item(uid, &name, &type, player->user_data)) {
++		tg_status_rsp(pdu, TG_STATUS_NO_FOLDER_ITEMS);
++		return;
++	}
++
++	has_name = name != NULL;
++	if (has_name) {
++		size_t n = strlen(name);
++
++		if (n > 200)
++			n = 200;
++		tg_put_be32(attrs, 1);			/* title */
++		tg_put_be16(attrs + 4, 106);		/* UTF-8 */
++		tg_put_be16(attrs + 6, (uint16_t) n);
++		memcpy(attrs + 8, name, n);
++		attrlen = 8 + n;
++		g_free(name);
++	}
++
++	len = tg_pdu_item_attributes(buf, sizeof(buf), has_name ? 1 : 0,
++							attrs, attrlen);
++	tg_write_rsp(pdu, buf, len);
++}
++
++static void tg_get_total_items(struct avrcp *session,
++			struct avrcp_browsing_header *pdu, uint8_t transaction)
++{
++	struct avrcp_player *player = tg_player(session);
++	uint8_t buf[16];
++	size_t len;
++	uint32_t total = 0;
++
++	if (ntohs(pdu->param_len) < 1 || player == NULL ||
++			player->cb->get_total == NULL) {
++		tg_status_rsp(pdu, TG_STATUS_INVALID_PARAM);
++		return;
++	}
++
++	/* The true total comes from the media layer, not from a cached window. */
++	total = player->cb->get_total(session->tg_folder, player->user_data);
++	len = tg_pdu_total_items(buf, sizeof(buf), session->tg_uid_counter,
++									total);
++	tg_write_rsp(pdu, buf, len);
++}
++
++static uint8_t tg_handle_play_item(struct avrcp *session,
++				struct avrcp_header *pdu, uint8_t transaction)
++{
++	struct avrcp_player *player = tg_player(session);
++	uint64_t uid;
++
++	if (player == NULL || player->cb->play_item == NULL ||
++			ntohs(pdu->params_len) < 9) {
++		pdu->params_len = htons(1);
++		pdu->params[0] = AVRCP_STATUS_PLAYER_NOT_BROWSABLE;
++		return AVC_CTYPE_REJECTED;
++	}
++
++	uid = ((uint64_t) tg_get_be32(pdu->params + 1) << 32) |
++						tg_get_be32(pdu->params + 5);
++	player->cb->play_item(uid, player->user_data);
++	pdu->params_len = htons(0);
++
++	return AVC_CTYPE_ACCEPTED;
++}
++
++void avrcp_tg_browse_done(struct avrcp_player *player, GSList *items,
++								uint32_t total)
++{
++	struct avrcp *session;
++	uint8_t *packed = NULL, buf[8 + TG_MAX_BROWSE_PAYLOAD];
++	size_t packed_len = 0, len;
++	GSList *l;
++
++	if (player == NULL || player->sessions == NULL)
++		goto done;
++
++	session = player->sessions->data;
++	if (session == NULL || !avctp_defer_is_pending(&session->defer))
++		goto done;
++
++	if (!tg_pending_is_current(session->tg_pending,
++						session->defer.transaction))
++		goto done;
++
++	for (l = items; l != NULL; l = l->next) {
++		struct tg_browse_item *item = l->data;
++		uint8_t one[300];
++		size_t n;
++
++		if (item == NULL)
++			continue;
++
++		n = sim_encode_folder_item(one, sizeof(one), item->type,
++							item->uid, item->name);
++		if (n == 0 || packed_len + n > 500)
++			continue;
++
++		packed = g_realloc(packed, packed_len + n);
++		memcpy(packed + packed_len, one, n);
++		packed_len += n;
++	}
++
++	len = tg_pdu_folder_items(buf, sizeof(buf), session->tg_uid_counter,
++						packed, packed_len);
++	{
++		uint8_t transaction = session->defer.transaction;
++
++		avctp_send_browsing_rsp(session->conn, transaction, buf, len);
++		avctp_defer_free(&session->defer);
++		tg_pending_drop_stale(&session->tg_pending, transaction);
++	}
++
++done:
++	g_free(packed);
++	g_slist_free_full(items, g_free);
++}
++
++void avrcp_player_browsing_changed(struct avrcp_player *player)
++{
++	avrcp_player_event(player, AVRCP_EVENT_UIDS_CHANGED, NULL);
++}
++
++void avrcp_player_reset_browse(struct avrcp_player *player)
++{
++	GSList *l;
++
++	if (player == NULL)
++		return;
++
++	if (player->cb != NULL && player->cb->reset_browse != NULL)
++		player->cb->reset_browse(player->user_data);
++
++	for (l = player->sessions; l != NULL; l = l->next) {
++		struct avrcp *session = l->data;
++
++		if (session == NULL)
++			continue;
++		tg_pending_drop_player(&session->tg_pending, player->id);
++		avctp_defer_free(&session->defer);
++	}
++}
++
+ static struct browsing_pdu_handler {
+ 	uint8_t pdu_id;
+ 	void (*func) (struct avrcp *session, struct avrcp_browsing_header *pdu,
+ 							uint8_t transaction);
+ } browsing_handlers[] = {
+-		{ AVRCP_GET_FOLDER_ITEMS, avrcp_handle_get_folder_items },
++		{ AVRCP_GET_FOLDER_ITEMS, tg_get_folder_items },
++		{ AVRCP_SET_BROWSED_PLAYER, tg_set_browsed_player },
++		{ AVRCP_CHANGE_PATH, tg_change_path },
++		{ AVRCP_GET_ITEM_ATTRIBUTES, tg_get_item_attributes },
++		{ AVRCP_GET_TOTAL_NUMBER_OF_ITEMS, tg_get_total_items },
+ 		{ },
+ };
+ 
+@@ -3440,6 +3769,7 @@
+ 	if (player->changed_id > 0)
+ 		g_source_remove(player->changed_id);
+ 
++	avrcp_player_reset_browse(player);
+ 	g_slist_free(player->sessions);
+ 	g_free(player->path);
+ 	g_free(player->change_path);
+--- a/Makefile.plugins
++++ b/Makefile.plugins
+@@ -41,7 +41,15 @@
+ builtin_sources += profiles/audio/control.h profiles/audio/control.c \
+ 			profiles/audio/avctp.h profiles/audio/avctp.c \
+ 			profiles/audio/avrcp.h profiles/audio/avrcp.c \
+-			profiles/audio/player.h profiles/audio/player.c
++			profiles/audio/player.h profiles/audio/player.c \
++			profiles/audio/avrcp-tg-browse.h \
++			profiles/audio/avrcp-tg-browse.c \
++			profiles/audio/media-browse.h \
++			profiles/audio/media-browse.c \
++			profiles/audio/avctp-defer.h \
++			profiles/audio/avctp-defer.c \
++			profiles/audio/tg-pending.h \
++			profiles/audio/tg-pending.c
+ endif
+ 
+ if NETWORK
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -124,7 +124,11 @@
+ @AVRCP_TRUE@am__append_13 = profiles/audio/control.h profiles/audio/control.c \
+ @AVRCP_TRUE@			profiles/audio/avctp.h profiles/audio/avctp.c \
+ @AVRCP_TRUE@			profiles/audio/avrcp.h profiles/audio/avrcp.c \
+-@AVRCP_TRUE@			profiles/audio/player.h profiles/audio/player.c
++@AVRCP_TRUE@			profiles/audio/player.h profiles/audio/player.c \
++@AVRCP_TRUE@			profiles/audio/avrcp-tg-browse.h profiles/audio/avrcp-tg-browse.c \
++@AVRCP_TRUE@			profiles/audio/media-browse.h profiles/audio/media-browse.c \
++@AVRCP_TRUE@			profiles/audio/avctp-defer.h profiles/audio/avctp-defer.c \
++@AVRCP_TRUE@			profiles/audio/tg-pending.h profiles/audio/tg-pending.c
+ 
+ @NETWORK_TRUE@am__append_14 = network
+ @NETWORK_TRUE@am__append_15 = profiles/network/manager.c \
+@@ -1096,6 +1100,10 @@
+ 	profiles/audio/avctp.h profiles/audio/avctp.c \
+ 	profiles/audio/avrcp.h profiles/audio/avrcp.c \
+ 	profiles/audio/player.h profiles/audio/player.c \
++	profiles/audio/avrcp-tg-browse.h profiles/audio/avrcp-tg-browse.c \
++	profiles/audio/media-browse.h profiles/audio/media-browse.c \
++	profiles/audio/avctp-defer.h profiles/audio/avctp-defer.c \
++	profiles/audio/tg-pending.h profiles/audio/tg-pending.c \
+ 	profiles/network/manager.c profiles/network/bnep.h \
+ 	profiles/network/bnep.c profiles/network/server.h \
+ 	profiles/network/server.c profiles/network/connection.h \

@@ -1,0 +1,263 @@
+--- a/src/client.c
++++ b/src/client.c
+@@ -0,0 +1,90 @@
++/*
++ *
++ *  BlueZ - Bluetooth protocol stack for Linux
++ *
++ *  Copyright (C) 2026  HiBy
++ *
++ *  This program is free software; you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ *
++ */
++
++#include <errno.h>
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++
++#include "src/log.h"
++#include "src/client.h"
++
++int client_open(const char *path, struct sockaddr_un *addr)
++{
++	int fd;
++
++	fd = socket(AF_UNIX, SOCK_DGRAM, 0);
++	if (fd < 0) {
++		error("client: Could not create socket");
++		return -1;
++	}
++
++	memset(addr, 0, sizeof(*addr));
++	addr->sun_family = AF_UNIX;
++	snprintf(addr->sun_path, sizeof(addr->sun_path), "%s",
++						path != NULL ? path : SYS_CLIENT_SOCKET);
++
++	if (connect(fd, (struct sockaddr *) addr, sizeof(*addr)) < 0) {
++		error("client: Could not connect to %s", addr->sun_path);
++		close(fd);
++		return -2;
++	}
++
++	return fd;
++}
++
++int client_send(int fd, const char *msg, const void *addr, socklen_t len)
++{
++	ssize_t n;
++
++	if (msg == NULL)
++		return -EINVAL;
++
++	n = send(fd, msg, strlen(msg), 0);
++	if (n < 0) {
++		error("client: Could not send message");
++		return -1;
++	}
++
++	return (int) n;
++}
++
++int client_close(int fd)
++{
++	if (fd >= 0)
++		close(fd);
++
++	return 0;
++}
++
++int client_send_msg(const char *path, const char *msg)
++{
++	struct sockaddr_un addr;
++	int fd;
++
++	fd = client_open(path, &addr);
++	if (fd <= 0)
++		return -1;
++
++	client_send(fd, msg, &addr, sizeof(addr));
++	client_close(fd);
++
++	return 0;
++}
++
++int client_send_msg_2client(const char *msg)
++{
++	return client_send_msg(SYS_CLIENT_SOCKET, msg);
++}
+--- a/src/client.h
++++ b/src/client.h
+@@ -0,0 +1,29 @@
++/*
++ *
++ *  BlueZ - Bluetooth protocol stack for Linux
++ *
++ *  Copyright (C) 2026  HiBy
++ *
++ *  This program is free software; you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ *
++ */
++
++#ifndef BLUEZ_SRC_CLIENT_H
++#define BLUEZ_SRC_CLIENT_H
++
++#include <sys/socket.h>
++#include <sys/un.h>
++
++/* Unix datagram notification channel used by the HiBy system client. */
++#define SYS_CLIENT_SOCKET "/var/run/sys_client"
++
++int client_open(const char *path, struct sockaddr_un *addr);
++int client_send(int fd, const char *msg, const void *addr, socklen_t len);
++int client_close(int fd);
++int client_send_msg(const char *path, const char *msg);
++int client_send_msg_2client(const char *msg);
++
++#endif /* BLUEZ_SRC_CLIENT_H */
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -271,6 +271,7 @@
+ 			$(attrib_sources) $(btio_sources) \
+ 			src/bluetooth.ver \
+ 			src/main.c src/log.h src/log.c \
++			src/client.c src/client.h \
+ 			src/backtrace.h src/backtrace.c \
+ 			src/rfkill.c src/hcid.h src/sdpd.h \
+ 			src/sdpd-server.c src/sdpd-request.c \
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -3139,6 +3139,7 @@
+ 			$(attrib_sources) $(btio_sources) \
+ 			src/bluetooth.ver \
+ 			src/main.c src/log.h src/log.c \
++			src/client.c src/client.h \
+ 			src/backtrace.h src/backtrace.c \
+ 			src/rfkill.c src/hcid.h src/sdpd.h \
+ 			src/sdpd-server.c src/sdpd-request.c \
+--- a/profiles/audio/source.c
++++ b/profiles/audio/source.c
+@@ -45,6 +45,7 @@
+ #include "src/service.h"
+ #include "src/error.h"
+ #include "src/dbus-common.h"
++#include "src/client.h"
+ #include "src/shared/queue.h"
+ 
+ #include "avdtp.h"
+@@ -92,6 +93,15 @@
+ 	DBG("State changed %s: %s -> %s", device_get_path(dev),
+ 				str_state[old_state], str_state[new_state]);
+ 
++	{
++		char msg[160];
++
++		snprintf(msg, sizeof(msg), "BT:CHANGE %s AudioSource %s %d",
++				device_get_path(dev), str_state[new_state],
++				btd_device_get_product(dev));
++		client_send_msg_2client(msg);
++	}
++
+ 	for (l = source_callbacks; l != NULL; l = l->next) {
+ 		struct source_state_callback *cb = l->data;
+ 
+--- a/profiles/audio/sink.c
++++ b/profiles/audio/sink.c
+@@ -44,6 +44,7 @@
+ #include "src/service.h"
+ #include "src/error.h"
+ #include "src/dbus-common.h"
++#include "src/client.h"
+ #include "src/shared/queue.h"
+ 
+ #include "avdtp.h"
+@@ -94,6 +95,15 @@
+ 	DBG("State changed %s: %s -> %s", device_get_path(dev),
+ 				str_state[old_state], str_state[new_state]);
+ 
++	{
++		char msg[160];
++
++		snprintf(msg, sizeof(msg), "BT:CHANGE %s AudioSink %s %d",
++				device_get_path(dev), str_state[new_state],
++				btd_device_get_product(dev));
++		client_send_msg_2client(msg);
++	}
++
+ 	for (l = sink_callbacks; l != NULL; l = l->next) {
+ 		struct sink_state_callback *cb = l->data;
+ 
+--- a/profiles/audio/media.c
++++ b/profiles/audio/media.c
+@@ -43,6 +43,7 @@
+ #include "src/adapter.h"
+ #include "src/device.h"
+ #include "src/dbus-common.h"
++#include "src/client.h"
+ #include "src/profile.h"
+ 
+ #include "src/uuid-helper.h"
+@@ -1399,8 +1400,14 @@
+ static void set_metadata(struct media_player *mp, const char *key,
+ 							const char *value)
+ {
++	char msg[256];
++
+ 	DBG("%s=%s", key, value);
+ 	g_hash_table_replace(mp->track, g_strdup(key), g_strdup(value));
++
++	snprintf(msg, sizeof(msg), "BT:MEDIA %s: %s",
++			mp->path != NULL ? mp->path : "", value != NULL ? value : "");
++	client_send_msg_2client(msg);
+ }
+ 
+ static gboolean parse_string_metadata(struct media_player *mp, const char *key,
+--- a/profiles/input/hog.c
++++ b/profiles/input/hog.c
+@@ -50,6 +50,7 @@
+ #include "src/shared/uhid.h"
+ #include "src/shared/queue.h"
+ #include "src/plugin.h"
++#include "src/client.h"
+ 
+ #include "suspend.h"
+ #include "attrib/att.h"
+@@ -159,6 +160,15 @@
+ 		return -EINVAL;
+ 
+ 	btd_service_set_user_data(service, dev);
++
++	{
++		char msg[160];
++
++		snprintf(msg, sizeof(msg), "BT:CHANGE %s HID %s", path,
++								"connected");
++		client_send_msg_2client(msg);
++	}
++
+ 	return 0;
+ }
+ 
+@@ -170,6 +180,14 @@
+ 
+ 	DBG("path %s", path);
+ 
++	{
++		char msg[160];
++
++		snprintf(msg, sizeof(msg), "BT:CHANGE %s HID %s", path,
++							"disconnected");
++		client_send_msg_2client(msg);
++	}
++
+ 	hog_device_free(dev);
+ }
+ 

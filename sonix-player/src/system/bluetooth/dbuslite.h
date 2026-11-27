@@ -74,6 +74,12 @@ void dbus_w_i64(dbus_writer_t *w, int64_t v);
 void dbus_w_string(dbus_writer_t *w, const char *v);
 void dbus_w_path(dbus_writer_t *w, const char *v);
 
+// The caller is writing elements of an array of structs itself (the {oa{sv}}
+// tuples of a browsing reply): structs start on an eight-byte boundary, and
+// the writer can only know that for the first one. Call this before each later
+// tuple, after the variable-length path and dictionary have left it unaligned.
+void dbus_w_pad(dbus_writer_t *w, size_t align);
+
 // An array of `elem_sig`. Everything written between begin and end is its
 // content; the two must be paired, and they nest.
 typedef struct {
@@ -103,6 +109,7 @@ void dbus_w_variant_string(dbus_writer_t *w, const char *value);
 void dbus_w_variant_bool(dbus_writer_t *w, bool value);
 void dbus_w_variant_u16(dbus_writer_t *w, uint16_t value);
 void dbus_w_variant_u32(dbus_writer_t *w, uint32_t value);
+void dbus_w_variant_i64(dbus_writer_t *w, int64_t value);
 
 // ---------------------------------------------------------------------------
 // Reading a body

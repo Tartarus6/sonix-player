@@ -39,6 +39,11 @@ void btplayer_init(void);
 // registered.
 void btplayer_stop(void);
 
+// Drop the current BlueZ registration and connect again. bluez replaces its
+// media player objects when bluetoothd restarts; a D-Bus connection that stays
+// alive through that restart would otherwise leave the car with no metadata.
+void btplayer_reset(void);
+
 // Records that a transport command is being carried out now, and says whether
 // it is the duplicate of one already carried out a moment ago.
 //

@@ -1,0 +1,24 @@
+--- a/src/main.c
++++ b/src/main.c
+@@ -38,6 +38,7 @@
+ #include <sys/signalfd.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
++#include <sys/resource.h>
+ 
+ #include <glib.h>
+ 
+@@ -762,6 +763,13 @@
+ 
+ 	rfkill_init();
+ 
++	/* The Broadcom combo controller used on the R1 needs the daemon to
++	 * run at a higher priority to keep the ACL audio path fed. */
++	if (setpriority(PRIO_PROCESS, 0, -10) < 0)
++		DBG("vendor bcm priority notset");
++	else
++		info("bluez: vendor bcm set high priority");
++
+ 	DBG("Entering main loop");
+ 
+ 	mainloop_sd_notify("STATUS=Running");

@@ -86,6 +86,53 @@ static void host_shot_poll_cb(lv_timer_t *timer) {
 		screenshot_request();
 	}
 }
+
+// Opens the file browser on the simulator without a finger, for the headless
+// tests: SONIX_OPEN_BROWSER=1 switches to it once "remember track" has had its
+// moment, exactly as tapping Browse would. SONIX_BROWSER_OPEN_DIR goes on to
+#include "src/gui/library/browser.h"
+#include "src/gui/bluetooth/btsettings.h"
+#include "src/gui/shell/switcher.h"
+static void host_browser_refresh_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	browser_refresh();
+}
+// The Bluetooth page and its device menu, likewise for looking at layouts
+// without a mouse: SONIX_OPEN_BTSETTINGS=1, and SONIX_OPEN_BT_MENU=1 opens the
+// first paired device's menu a moment later.
+static void host_open_bt_menu_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	btsettings_host_open_device_menu();
+}
+static void host_open_consent_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	btsettings_host_show_consent();
+}
+
+static void host_open_btsettings_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	switch_screen(btsettings_screen);
+	if (getenv("SONIX_OPEN_BT_MENU")) {
+		lv_timer_create(host_open_bt_menu_cb, 1200, NULL);
+	}
+	if (getenv("SONIX_MOCK_CONSENT")) {
+		lv_timer_create(host_open_consent_cb, 1200, NULL);
+	}
+}
+
+static void host_open_browser_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	switch_screen(browser_screen);
+	const char *dir = getenv("SONIX_BROWSER_OPEN_DIR");
+	if (dir && dir[0]) {
+		browser_open_dir_public(dir);
+	}
+	// Re-read the page without a user action: what a late-mounted card does.
+	const char *refresh = getenv("SONIX_BROWSER_REFRESH_MS");
+	if (refresh) {
+		lv_timer_create(host_browser_refresh_cb, atoi(refresh), NULL);
+	}
+}
 #endif
 
 // "Remember track", deferred: restoring the remembered track kicks off a cover
@@ -2293,6 +2340,12 @@ int main(int argc, char **argv) {
 
 #ifdef HOST_BUILD
 	lv_timer_create(host_shot_poll_cb, 200, NULL); // see host_shot_poll_cb
+	if (getenv("SONIX_OPEN_BROWSER")) {
+		lv_timer_create(host_open_browser_cb, 1500, NULL);
+	}
+	if (getenv("SONIX_OPEN_BTSETTINGS")) {
+		lv_timer_create(host_open_btsettings_cb, 1500, NULL);
+	}
 #endif
 
 	// The media player bluez shows to the headphones. After gui_init, because

@@ -1,0 +1,20 @@
+--- a/profiles/audio/media.c
++++ b/profiles/audio/media.c
+@@ -1265,7 +1265,7 @@
+ 	return media_player_send(mp, "Stop");
+ }
+ 
+-static bool pause(void *user_data)
++static bool media_pause(void *user_data)
+ {
+ 	struct media_player *mp = user_data;
+ 
+@@ -1315,7 +1315,7 @@
+ 	.set_volume = set_volume,
+ 	.play = play,
+ 	.stop = stop,
+-	.pause = pause,
++	.pause = media_pause,
+ 	.next = next,
+ 	.previous = previous,
+ };

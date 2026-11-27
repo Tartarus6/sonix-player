@@ -1,0 +1,11 @@
+--- a/profiles/audio/avrcp.c
++++ b/profiles/audio/avrcp.c
+@@ -2030,6 +2030,8 @@
+ done:
+ 	session->transaction = transaction;
+ 	handler->func(session, pdu, transaction);
++	if (pdu->param_len == 0)
++		return 0;
+ 	return AVRCP_BROWSING_HEADER_LENGTH + ntohs(pdu->param_len);
+ }
+ 

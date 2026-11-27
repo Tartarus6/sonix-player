@@ -4118,6 +4118,10 @@ int audio_init(void) {
 int audio_play(const char *filepath) {
 	fprintf(stderr, "audio[%ld]: play requested '%s'\n", log_ms(), filepath);
 
+	// Real playback takes the PCM over from the silent keep-alive; two clients
+	// on the same BlueALSA transport would fight over it.
+	audio_bt_keepalive_stop();
+
 	// NO route write here: this runs on the UI thread while the previous
 	// track's PCM may still be open, and poking "Output Port Switch" with a
 	// configured stream up stalls the DMA (the after-headphone-plug wedge).
@@ -4521,6 +4525,111 @@ void audio_seek(double seconds) {
 // where the sound goes
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Idle A2DP keep-alive
+//
+// A car head unit that sees an OPEN but never STARTed A2DP stream drops the
+// link after a few seconds. BlueALSA sends AVDTP START only when a PCM client
+// acquires the transport, so with nothing playing we hold a silent PCM open.
+// A real audio_play() stops it before opening its own PCM.
+// ---------------------------------------------------------------------------
+
+static pthread_mutex_t bt_keep_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t bt_keep_tid;
+static bool bt_keep_valid;
+static volatile bool bt_keep_run;
+static char bt_keep_dev[160];
+static unsigned bt_keep_rate;
+
+static void bt_keep_mark_stopped(void) {
+	pthread_mutex_lock(&bt_keep_lock);
+	bt_keep_run = false;
+	bt_keep_valid = false;
+	pthread_mutex_unlock(&bt_keep_lock);
+}
+
+static void *bt_keep_thread(void *unused) {
+	(void)unused;
+	char dev[160];
+	unsigned rate;
+	pthread_mutex_lock(&bt_keep_lock);
+	snprintf(dev, sizeof(dev), "%s", bt_keep_dev);
+	rate = bt_keep_rate;
+	pthread_mutex_unlock(&bt_keep_lock);
+
+	snd_pcm_t *pcm = NULL;
+	if (snd_pcm_open(&pcm, dev, SND_PCM_STREAM_PLAYBACK, 0) < 0) {
+		fprintf(stderr, "audio[%ld]: Bluetooth keep-alive could not open '%s'\n", log_ms(), dev);
+		bt_keep_mark_stopped();
+		return NULL;
+	}
+	if (snd_pcm_set_params(pcm, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED, 2, rate, 1, 100000) < 0) {
+		fprintf(stderr, "audio[%ld]: Bluetooth keep-alive could not set '%s' to %u Hz\n", log_ms(), dev, rate);
+		snd_pcm_close(pcm);
+		bt_keep_mark_stopped();
+		return NULL;
+	}
+
+	// Zero-filled interleaved stereo frames. Writing them keeps BlueALSA's
+	// transport acquired and started; no sound comes out of the car.
+	static int16_t silence[2048];
+	fprintf(stderr, "audio[%ld]: Bluetooth keep-alive on '%s' (%u Hz)\n", log_ms(), dev, rate);
+	while (bt_keep_run) {
+		snd_pcm_sframes_t n = snd_pcm_writei(pcm, silence, 1024);
+		if (n == -EPIPE || n == -ESTRPIPE) {
+			snd_pcm_recover(pcm, n, 1);
+			continue;
+		}
+		if (n < 0) {
+			fprintf(stderr, "audio[%ld]: Bluetooth keep-alive write failed (%ld)\n", log_ms(), (long)n);
+			break;
+		}
+	}
+	snd_pcm_close(pcm);
+	bt_keep_mark_stopped();
+	fprintf(stderr, "audio[%ld]: Bluetooth keep-alive stopped\n", log_ms());
+	return NULL;
+}
+
+void audio_bt_keepalive_start(const char *pcm, unsigned rate) {
+	if (!pcm || !pcm[0] || strncmp(pcm, "bluealsa", 8) != 0) {
+		return;
+	}
+	audio_bt_keepalive_stop();
+
+	pthread_mutex_lock(&bt_keep_lock);
+	snprintf(bt_keep_dev, sizeof(bt_keep_dev), "%s", pcm);
+	bt_keep_rate = rate ? rate : 48000;
+	bt_keep_run = true;
+	bt_keep_valid = true;
+	if (pthread_create(&bt_keep_tid, NULL, bt_keep_thread, NULL) != 0) {
+		bt_keep_run = false;
+		bt_keep_valid = false;
+		fprintf(stderr, "audio[%ld]: Bluetooth keep-alive thread failed\n", log_ms());
+	}
+	pthread_mutex_unlock(&bt_keep_lock);
+}
+
+bool audio_bt_keepalive_active(void) {
+	pthread_mutex_lock(&bt_keep_lock);
+	bool active = bt_keep_valid && bt_keep_run;
+	pthread_mutex_unlock(&bt_keep_lock);
+	return active;
+}
+
+void audio_bt_keepalive_stop(void) {
+	pthread_mutex_lock(&bt_keep_lock);
+	if (!bt_keep_valid) {
+		pthread_mutex_unlock(&bt_keep_lock);
+		return;
+	}
+	bt_keep_run = false;
+	pthread_t tid = bt_keep_tid;
+	bt_keep_valid = false;
+	pthread_mutex_unlock(&bt_keep_lock);
+	pthread_join(tid, NULL);
+}
+
 void audio_set_output_device(const char *pcm) {
 	pthread_mutex_lock(&output_lock);
 	char before[sizeof(output_pcm)];
@@ -4540,6 +4649,10 @@ void audio_set_output_device(const char *pcm) {
 
 	if (strcmp(before, after) != 0) {
 		fprintf(stderr, "audio[%ld]: the output moves from '%s' to '%s'\n", log_ms(), before, after);
+	}
+	// No reason to hold an A2DP stream open once the output is elsewhere.
+	if (strncmp(after, "bluealsa", 8) != 0) {
+		audio_bt_keepalive_stop();
 	}
 }
 

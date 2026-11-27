@@ -1,0 +1,72 @@
+--- a/profiles/audio/avctp.c
++++ b/profiles/audio/avctp.c
+@@ -1036,24 +1036,29 @@
+ 		return TRUE;
+ 	}
+ 
+-	packet_size = AVCTP_HEADER_LENGTH;
+ 	avctp->cr = AVCTP_RESPONSE;
+ 
+ 	handler = g_slist_nth_data(browsing->handlers, 0);
+ 	if (handler == NULL) {
+ 		DBG("handler not found");
+-		packet_size += avrcp_browsing_general_reject(operands);
++		packet_size = AVCTP_HEADER_LENGTH +
++				avrcp_browsing_general_reject(operands);
+ 		goto send;
+ 	}
+ 
+-	packet_size += handler->cb(session, avctp->transaction,
++	/* The handler returns the length of the response operands.  Zero means
++	 * the reply was deferred and will be sent later with
++	 * avctp_send_browsing_rsp(); suppress the immediate write. */
++	packet_size = handler->cb(session, avctp->transaction,
+ 						operands, operand_count,
+ 						handler->user_data);
++	if (packet_size == 0)
++		return TRUE;
+ 
+ send:
+ 	if (packet_size != 0) {
+-		ret = write(sock, buf, packet_size);
+-		if (ret != packet_size)
++		ret = write(sock, buf, AVCTP_HEADER_LENGTH + packet_size);
++		if (ret != AVCTP_HEADER_LENGTH + packet_size)
+ 			goto failed;
+ 	}
+ 
+@@ -1798,6 +1803,24 @@
+ 	return 0;
+ }
+ 
++int avctp_send_browsing_rsp(struct avctp *session, uint8_t transaction,
++				uint8_t *operands, size_t operand_count)
++{
++	struct avctp_channel *browsing;
++	struct avctp_queue *queue;
++
++	if (session == NULL || session->browsing == NULL)
++		return -ENOTCONN;
++
++	browsing = session->browsing;
++	queue = g_slist_nth_data(browsing->queues, 0);
++	if (queue == NULL)
++		return -ENOTCONN;
++
++	return avctp_browsing_send(queue, transaction, AVCTP_RESPONSE,
++							operands, operand_count);
++}
++
+ static const char *op2str(uint8_t op)
+ {
+ 	int i;
+--- a/profiles/audio/avctp.h
++++ b/profiles/audio/avctp.h
+@@ -183,3 +183,7 @@
+ int avctp_send_browsing_req(struct avctp *session,
+ 				uint8_t *operands, size_t operand_count,
+ 				avctp_browsing_rsp_cb func, void *user_data);
++
++/* Send a deferred browsing response.  The caller owns operands. */
++int avctp_send_browsing_rsp(struct avctp *session, uint8_t transaction,
++				uint8_t *operands, size_t operand_count);

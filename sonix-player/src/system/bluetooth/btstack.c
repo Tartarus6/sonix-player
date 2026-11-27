@@ -3,11 +3,13 @@
 #include <ctype.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
 
 #include "src/system/bluetooth/dbuslite.h"
+#include "src/system/core/config.h"
 
 #define BLUEZ_SERVICE "org.bluez"
 #define BLUEZ_ROOT "/org/bluez"
@@ -28,11 +30,10 @@
 #define PROPS_IFACE "org.freedesktop.DBus.Properties"
 #define OBJMAN_IFACE "org.freedesktop.DBus.ObjectManager"
 
-// The player's agent. NoInputNoOutput because the device has neither a keypad
-// nor a display the other end can be asked to compare a number on: pairing is
-// Just Works, which is what every pair of headphones expects anyway.
+// The player's agent. KeyboardDisplay so BlueZ can request PIN/passkey entry,
+// confirmation, or display when the remote device requires it.
 #define AGENT_PATH "/org/sonix/bluetooth/agent"
-#define AGENT_CAPABILITY "NoInputNoOutput"
+#define AGENT_CAPABILITY "KeyboardDisplay"
 
 // The A2DP sink UUID, which is what separates a pair of headphones from a phone
 // in a scan list.
@@ -606,18 +607,221 @@ static void on_signal(dbus_conn_t *c, const dbus_msg_t *m, void *user) {
 
 // ---------------------------------------------------------------------------
 // the pairing agent
-//
-// bluez calls exactly one agent for a pairing, and the firmware starts
-// `bt-agent` for the job. Two agents cannot both be the default, which is why
-// the bring-up stops that one: from here on the player answers for itself.
-//
-// With NoInputNoOutput the only calls that actually arrive are
-// RequestConfirmation (answered by accepting: the user has just tapped this
-// device on the screen, which IS the confirmation) and AuthorizeService. The
-// rest are implemented because an agent that does not reply leaves bluez
-// waiting for its whole timeout, and a pairing that hangs for thirty seconds is
-// indistinguishable from one that failed.
 // ---------------------------------------------------------------------------
+
+typedef struct {
+	bool pending;
+	btstack_pair_req_t type;
+	char sender[DBUS_NAME_MAX];
+	uint32_t serial;
+	char device[OBJECT_PATH_MAX];
+	char passkey[32];
+} pair_req_state_t;
+
+static pthread_mutex_t pair_lock = PTHREAD_MUTEX_INITIALIZER;
+static pair_req_state_t pair_req;
+
+static void pair_req_clear_locked(void) {
+	memset(&pair_req, 0, sizeof(pair_req));
+}
+
+static void note_pair_change(void) { note_change(); }
+
+static void path_to_addr(const char *path, char *out, size_t size) {
+	// org.bluez path ends with dev_XX_XX_XX_XX_XX_XX
+	const char *p = strrchr(path ? path : "", '_');
+	if (!path || !strstr(path, "/dev_")) {
+		snprintf(out, size, "%s", path ? path : "");
+		return;
+	}
+	const char *dev = strstr(path, "dev_");
+	if (!dev) {
+		snprintf(out, size, "%s", path);
+		return;
+	}
+	dev += 4;
+	size_t i = 0;
+	while (*dev && i + 1 < size) {
+		out[i++] = (*dev == '_') ? ':' : *dev;
+		dev++;
+	}
+	out[i] = '\0';
+	(void)p;
+}
+
+static void set_pair_request(btstack_pair_req_t type, const dbus_msg_t *m, const char *device_path, const char *passkey) {
+	pthread_mutex_lock(&pair_lock);
+	// If there's an outstanding deferred request, reject it to avoid hanging BlueZ.
+	if (pair_req.pending && pair_req.type != BTSTACK_PAIR_DISPLAY) {
+		pthread_mutex_lock(&lock);
+		dbus_conn_t *c = conn;
+		pthread_mutex_unlock(&lock);
+		if (c) {
+			dbus_msg_t old = {0};
+			old.serial = pair_req.serial;
+			snprintf(old.sender, sizeof(old.sender), "%s", pair_req.sender);
+			dbus_error(c, &old, "org.bluez.Error.Canceled", "superseded");
+		}
+	}
+	pair_req.pending = true;
+	pair_req.type = type;
+	snprintf(pair_req.sender, sizeof(pair_req.sender), "%s", m->sender);
+	pair_req.serial = m->serial;
+	snprintf(pair_req.device, sizeof(pair_req.device), "%s", device_path ? device_path : "");
+	snprintf(pair_req.passkey, sizeof(pair_req.passkey), "%s", passkey ? passkey : "");
+	pthread_mutex_unlock(&pair_lock);
+	note_pair_change();
+}
+
+#ifdef HOST_BUILD
+// The simulator has no bluez to ask, so a PIN prompt can be put on screen on
+// demand: SONIX_MOCK_PIN=0..3. It exists only to look at and click the dialog.
+static bool host_mock_pin_done;
+
+static bool host_mock_pin_active(void) {
+	const char *mode = getenv("SONIX_MOCK_PIN");
+	return mode && mode[0] && !host_mock_pin_done;
+}
+#endif
+
+bool btstack_pair_request_pending(void) {
+#ifdef HOST_BUILD
+	if (host_mock_pin_active()) {
+		return true;
+	}
+#endif
+	pthread_mutex_lock(&pair_lock);
+	bool p = pair_req.pending;
+	pthread_mutex_unlock(&pair_lock);
+	return p;
+}
+
+btstack_pair_req_t btstack_pair_request_type(void) {
+#ifdef HOST_BUILD
+	if (host_mock_pin_active()) {
+		// The environment names the UI mode (0 PIN, 1 passkey, 2 confirm,
+		// 3 display); the enum has NONE first.
+		return (btstack_pair_req_t)(atoi(getenv("SONIX_MOCK_PIN")) + 1);
+	}
+#endif
+	pthread_mutex_lock(&pair_lock);
+	btstack_pair_req_t t = pair_req.type;
+	pthread_mutex_unlock(&pair_lock);
+	return t;
+}
+
+void btstack_pair_request_info(char *device, size_t device_size, char *passkey, size_t passkey_size) {
+#ifdef HOST_BUILD
+	if (host_mock_pin_active()) {
+		const char *addr = getenv("SONIX_MOCK_PIN_DEVICE");
+		const char *code = getenv("SONIX_MOCK_PIN_CODE");
+		if (device && device_size) {
+			snprintf(device, device_size, "%s", addr && addr[0] ? addr : "28:0F:EB:AC:53:EA");
+		}
+		if (passkey && passkey_size) {
+			snprintf(passkey, passkey_size, "%s", code && code[0] ? code : "950401");
+		}
+		return;
+	}
+#endif
+	pthread_mutex_lock(&pair_lock);
+	if (device && device_size) {
+		path_to_addr(pair_req.device, device, device_size);
+	}
+	if (passkey && passkey_size) {
+		snprintf(passkey, passkey_size, "%s", pair_req.passkey);
+	}
+	pthread_mutex_unlock(&pair_lock);
+}
+
+void btstack_pair_request_cancel(void) { btstack_pair_request_reply(NULL); }
+
+void btstack_pair_request_reply(const char *value) {
+#ifdef HOST_BUILD
+	if (host_mock_pin_active()) {
+		host_mock_pin_done = true;
+		return;
+	}
+#endif
+	pair_req_state_t req;
+	pthread_mutex_lock(&pair_lock);
+	req = pair_req;
+	pair_req_clear_locked();
+	pthread_mutex_unlock(&pair_lock);
+	if (!req.pending) {
+		return;
+	}
+
+	pthread_mutex_lock(&lock);
+	dbus_conn_t *c = conn;
+	pthread_mutex_unlock(&lock);
+	if (!c) {
+		note_pair_change();
+		return;
+	}
+
+	dbus_msg_t call = {0};
+	call.serial = req.serial;
+	snprintf(call.sender, sizeof(call.sender), "%s", req.sender);
+
+	switch (req.type) {
+	case BTSTACK_PAIR_PIN:
+		if (value && value[0]) {
+			fprintf(stderr, "btstack: agent PIN answered (%zu digits)\n", strlen(value));
+			dbus_writer_t *w = dbus_reply_begin(c, &call, "s");
+			dbus_w_string(w, value);
+			dbus_reply_send(c);
+		} else {
+			fprintf(stderr, "btstack: agent PIN canceled\n");
+			dbus_error(c, &call, "org.bluez.Error.Rejected", "canceled");
+		}
+		break;
+	case BTSTACK_PAIR_PASSKEY:
+		if (value && value[0]) {
+			char *end = NULL;
+			unsigned long v = strtoul(value, &end, 10);
+			if (end && *end == '\0') {
+				fprintf(stderr, "btstack: agent passkey answered (%lu)\n", v);
+				dbus_writer_t *w = dbus_reply_begin(c, &call, "u");
+				dbus_w_u32(w, (uint32_t)v);
+				dbus_reply_send(c);
+			} else {
+				fprintf(stderr, "btstack: agent passkey invalid\n");
+				dbus_error(c, &call, "org.bluez.Error.Rejected", "invalid");
+			}
+		} else {
+			fprintf(stderr, "btstack: agent passkey canceled\n");
+			dbus_error(c, &call, "org.bluez.Error.Rejected", "canceled");
+		}
+		break;
+	case BTSTACK_PAIR_CONFIRM:
+		if (value && strcmp(value, "yes") == 0) {
+			fprintf(stderr, "btstack: agent passkey confirmed\n");
+			dbus_reply_begin(c, &call, "");
+			dbus_reply_send(c);
+		} else {
+			fprintf(stderr, "btstack: agent passkey rejected\n");
+			dbus_error(c, &call, "org.bluez.Error.Rejected", "rejected");
+		}
+		break;
+	case BTSTACK_PAIR_AUTHORIZE:
+		if (value && strcmp(value, "yes") == 0) {
+			fprintf(stderr, "btstack: agent authorization accepted\n");
+			dbus_reply_begin(c, &call, "");
+			dbus_reply_send(c);
+		} else {
+			fprintf(stderr, "btstack: agent authorization rejected\n");
+			dbus_error(c, &call, "org.bluez.Error.Rejected", "rejected");
+		}
+		break;
+	case BTSTACK_PAIR_DISPLAY:
+		// already replied; just dismiss UI
+		break;
+	default:
+		break;
+	}
+	note_pair_change();
+}
 
 static void on_call(dbus_conn_t *c, const dbus_msg_t *m, void *user) {
 	(void)user;
@@ -627,22 +831,46 @@ static void on_call(dbus_conn_t *c, const dbus_msg_t *m, void *user) {
 		return;
 	}
 
-	// Everything that is answered by simply agreeing. An empty reply is what
-	// bluez reads as "accepted".
-	if (strcmp(m->member, "Release") == 0 || strcmp(m->member, "Cancel") == 0 ||
-		strcmp(m->member, "RequestConfirmation") == 0 || strcmp(m->member, "RequestAuthorization") == 0 ||
-		strcmp(m->member, "DisplayPasskey") == 0 || strcmp(m->member, "DisplayPinCode") == 0) {
-		fprintf(stderr, "btstack: agent %s -> accepted\n", m->member);
+	if (strcmp(m->member, "Release") == 0) {
 		dbus_reply_begin(c, m, "");
 		dbus_reply_send(c);
 		return;
 	}
 
+	if (strcmp(m->member, "RequestAuthorization") == 0) {
+		if (!config_get_bool("bluetooth", "confirm_pairing", false)) {
+			fprintf(stderr, "btstack: agent RequestAuthorization -> accepted\n");
+			dbus_reply_begin(c, m, "");
+			dbus_reply_send(c);
+			return;
+		}
+		fprintf(stderr, "btstack: agent RequestAuthorization\n");
+		set_pair_request(BTSTACK_PAIR_AUTHORIZE, m, "", "");
+		return;
+	}
+
+	if (strcmp(m->member, "Cancel") == 0) {
+		fprintf(stderr, "btstack: agent Cancel\n");
+		pthread_mutex_lock(&pair_lock);
+		bool had = pair_req.pending && pair_req.type != BTSTACK_PAIR_DISPLAY;
+		uint32_t serial = pair_req.serial;
+		char sender[DBUS_NAME_MAX];
+		snprintf(sender, sizeof(sender), "%s", pair_req.sender);
+		pair_req_clear_locked();
+		pthread_mutex_unlock(&pair_lock);
+		if (had) {
+			dbus_msg_t old = {0};
+			old.serial = serial;
+			snprintf(old.sender, sizeof(old.sender), "%s", sender);
+			dbus_error(c, &old, "org.bluez.Error.Canceled", "canceled");
+		}
+		dbus_reply_begin(c, m, "");
+		dbus_reply_send(c);
+		note_pair_change();
+		return;
+	}
+
 	if (strcmp(m->member, "AuthorizeService") == 0) {
-		// The UUID is logged rather than filtered. A pair of headphones asks to
-		// be allowed A2DP and AVRCP, and often one or two vendor services on
-		// top; refusing those has broken remote-control buttons on real
-		// hardware, and the user authorised this device by tapping it.
 		dbus_reader_t r;
 		dbus_reader_init(&r, m);
 		char path[OBJECT_PATH_MAX] = "", uuid[48] = "";
@@ -654,12 +882,89 @@ static void on_call(dbus_conn_t *c, const dbus_msg_t *m, void *user) {
 		return;
 	}
 
-	// A PIN or a passkey cannot be produced by a device with no keypad. Refused
-	// explicitly, because that is an answer: bluez gives up at once instead of
-	// waiting for a reply that was never coming.
-	if (strcmp(m->member, "RequestPinCode") == 0 || strcmp(m->member, "RequestPasskey") == 0) {
-		fprintf(stderr, "btstack: agent %s -> refused (no keypad on this device)\n", m->member);
-		dbus_error(c, m, "org.bluez.Error.Rejected", "no input on this device");
+	if (strcmp(m->member, "RequestPinCode") == 0) {
+		dbus_reader_t r;
+		dbus_reader_init(&r, m);
+		char path[OBJECT_PATH_MAX] = "";
+		dbus_r_string(&r, path, sizeof(path));
+		fprintf(stderr, "btstack: agent RequestPinCode for %s\n", path);
+		set_pair_request(BTSTACK_PAIR_PIN, m, path, "");
+		return;
+	}
+
+	if (strcmp(m->member, "RequestPasskey") == 0) {
+		dbus_reader_t r;
+		dbus_reader_init(&r, m);
+		char path[OBJECT_PATH_MAX] = "";
+		dbus_r_string(&r, path, sizeof(path));
+		fprintf(stderr, "btstack: agent RequestPasskey for %s\n", path);
+		set_pair_request(BTSTACK_PAIR_PASSKEY, m, path, "");
+		return;
+	}
+
+	if (strcmp(m->member, "RequestConfirmation") == 0) {
+		dbus_reader_t r;
+		dbus_reader_init(&r, m);
+		char path[OBJECT_PATH_MAX] = "";
+		uint32_t passkey = 0;
+		dbus_r_string(&r, path, sizeof(path));
+		dbus_r_u32(&r, &passkey);
+		char pk[16];
+		snprintf(pk, sizeof(pk), "%06u", (unsigned)passkey);
+		fprintf(stderr, "btstack: agent RequestConfirmation %s for %s\n", pk, path);
+		// A zero here is Just Works, the pairing every pair of headphones
+		// expects: nothing to compare, and the user already chose the device
+		// by tapping it. A non-zero passkey is numeric comparison, which is
+		// the one that must not be accepted on the user's behalf.
+		if (passkey == 0) {
+			dbus_reply_begin(c, m, "");
+			dbus_reply_send(c);
+			return;
+		}
+		set_pair_request(BTSTACK_PAIR_CONFIRM, m, path, pk);
+		return;
+	}
+
+	if (strcmp(m->member, "DisplayPinCode") == 0) {
+		dbus_reader_t r;
+		dbus_reader_init(&r, m);
+		char path[OBJECT_PATH_MAX] = "", pin[32] = "";
+		dbus_r_string(&r, path, sizeof(path));
+		dbus_r_string(&r, pin, sizeof(pin));
+		fprintf(stderr, "btstack: agent DisplayPinCode %s for %s\n", pin, path);
+		dbus_reply_begin(c, m, "");
+		dbus_reply_send(c);
+		pthread_mutex_lock(&pair_lock);
+		pair_req.pending = true;
+		pair_req.type = BTSTACK_PAIR_DISPLAY;
+		snprintf(pair_req.device, sizeof(pair_req.device), "%s", path);
+		snprintf(pair_req.passkey, sizeof(pair_req.passkey), "%s", pin);
+		pthread_mutex_unlock(&pair_lock);
+		note_pair_change();
+		return;
+	}
+
+	if (strcmp(m->member, "DisplayPasskey") == 0) {
+		dbus_reader_t r;
+		dbus_reader_init(&r, m);
+		char path[OBJECT_PATH_MAX] = "";
+		uint32_t passkey = 0;
+		uint16_t entered = 0;
+		dbus_r_string(&r, path, sizeof(path));
+		dbus_r_u32(&r, &passkey);
+		dbus_r_u16(&r, &entered);
+		char pk[16];
+		snprintf(pk, sizeof(pk), "%06u", (unsigned)passkey);
+		fprintf(stderr, "btstack: agent DisplayPasskey %s (%u) for %s\n", pk, (unsigned)entered, path);
+		dbus_reply_begin(c, m, "");
+		dbus_reply_send(c);
+		pthread_mutex_lock(&pair_lock);
+		pair_req.pending = true;
+		pair_req.type = BTSTACK_PAIR_DISPLAY;
+		snprintf(pair_req.device, sizeof(pair_req.device), "%s", path);
+		snprintf(pair_req.passkey, sizeof(pair_req.passkey), "%s", pk);
+		pthread_mutex_unlock(&pair_lock);
+		note_pair_change();
 		return;
 	}
 

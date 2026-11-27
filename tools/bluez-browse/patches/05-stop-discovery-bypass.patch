@@ -1,0 +1,18 @@
+--- a/src/adapter.c
++++ b/src/adapter.c
+@@ -2625,8 +2625,13 @@
+ 
+ 	list = g_slist_find_custom(adapter->discovery_list, sender,
+ 						compare_sender);
+-	if (!list)
+-		return btd_error_failed(msg, "No discovery started");
++	if (!list) {
++		/* The HiBy shell stops discovery on behalf of the client that
++		 * started it, so accept the first active client here. */
++		list = adapter->discovery_list;
++		if (!list)
++			return btd_error_failed(msg, "No discovery started");
++	}
+ 
+ 	client = list->data;
+ 
