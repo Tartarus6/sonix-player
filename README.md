@@ -191,12 +191,16 @@ The device's buttons are on the keyboard:
 
 ### What you need
 
-The first target build compiles a MIPS cross toolchain from source. On Debian, install these packages in addition to the host requirements above:
+The first target build compiles a MIPS cross toolchain from source. In addition to the host requirements above, it needs `wget`, `xz`, `bzip2`, `gzip`, `patch`, Texinfo, Bison, Flex, GNU M4, GNU Awk, a current `config.guess`, and the development headers and libraries for GMP, MPFR and MPC.
+
+Package names vary by distribution. For example, on Debian:
 
 ```bash
-sudo apt install wget texinfo bison flex m4 gawk autotools-dev \
-                 libgmp-dev libmpfr-dev libmpc-dev
+sudo apt install wget xz-utils bzip2 gzip patch texinfo bison flex m4 gawk \
+                 autotools-dev libgmp-dev libmpfr-dev libmpc-dev
 ```
+
+If your distribution installs `config.guess` in a different location, set `RBDEV_CONFIG_GUESS` to its path.
 
 Allow several gigabytes of free disk space for the downloaded sources and build files.
 
