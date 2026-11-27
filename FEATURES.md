@@ -55,6 +55,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **ReplayGain** - off, by track or by album, read from the tags.
 - **Remember track** - the queue and the position are still there after a restart. You can also open Now Playing straight away at startup.
 - **Sleep timer** - set a time and the playback pauses by itself when it runs out. There is one for music, one for audiobooks and one for podcasts.
+- **Auto sleep timer** - switch it on in Settings and pick a start and end time; music and audiobooks arm themselves every night in that window with a 30-minute stretch when no manual sleep duration is set (otherwise that configured duration is used), and a button press starts the countdown again. No manual sleep duration needs to be set, and a manual timer already counting is left alone.
 
 ## Now Playing
 

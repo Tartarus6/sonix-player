@@ -22,6 +22,7 @@
 #include "src/system/library/audiobookdb.h"
 #include "src/system/device/clock.h"
 #include "src/system/playback/device_state.h"
+#include "src/system/playback/sleeptimer.h"
 #include "src/system/remote/dlna.h"
 #include "src/system/remote/sonixlink.h"
 #include "src/system/streaming/qobuzcache.h"
@@ -1816,6 +1817,7 @@ void power_notify_activity(void) {
 	pthread_mutex_lock(&g_lock);
 	g_last_button_activity_ms = lv_tick_get();
 	pthread_mutex_unlock(&g_lock);
+	sleeptimer_note_activity();
 }
 
 // On the UI thread: the press is taken now rather than at the timer's next

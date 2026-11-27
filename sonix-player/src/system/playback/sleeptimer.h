@@ -59,11 +59,44 @@ bool sleeptimer_running(sleeptimer_kind_t kind);
 // tick is worth running.
 bool sleeptimer_any_running(void);
 
+// Whether the one-second tick has work to do. It must stay alive while the
+// automatic option is on, the clock is set and music or an audiobook is playing,
+// so a window opening mid-track is noticed. Podcasts, radio and other external
+// sources can never be auto-armed and do not keep it running; nor does a manual
+// stretch paused with playback. Callers that change the setting or the clock
+// re-check the window first, then ask this so the tick follows the setting too,
+// not just playback.
+bool sleeptimer_tick_needed(bool playing);
+
 // True exactly once, on the tick that kind's time runs out. The caller stops
 // the music: this file has no business knowing how.
 bool sleeptimer_expired(sleeptimer_kind_t kind);
 
 // What is left of that stretch, in seconds, or 0 when it is not counting.
 int sleeptimer_remaining(sleeptimer_kind_t kind);
+
+// The nightly window in which music and audiobooks arm themselves. Times are
+// minutes from midnight; equal endpoints mean every hour of the day. The
+// automatic stretch has its own length, so no manual sleep time has to be set.
+typedef struct {
+	bool enabled;
+	int start;
+	int end;
+} sleeptimer_auto_t;
+
+void sleeptimer_auto_get(sleeptimer_auto_t *out);
+void sleeptimer_auto_set(const sleeptimer_auto_t *value);
+
+// True when `now` falls inside the window, with a window that crosses midnight
+// treated as two pieces. Kept public so the boundaries can be tested directly.
+bool sleeptimer_span_contains(int now, int start, int end);
+
+// Called on the one-second tick: reads the clock and arms or disarms the two
+// eligible timers when the player enters or leaves the window, leaving a manual
+// timer that is already counting untouched.
+void sleeptimer_check_auto(void);
+
+// A button press means the listener is still awake: the stretch starts again.
+void sleeptimer_note_activity(void);
 
 #endif /* SLEEPTIMER_H */

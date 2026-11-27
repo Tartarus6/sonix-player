@@ -7,6 +7,7 @@
 #include "lvgl/lvgl.h"
 
 #include "src/gui/fonts/fonts.h"
+#include "src/gui/nowplaying/player.h"
 #include "src/gui/shell/confirm.h"
 #include "src/gui/shell/icons.h"
 #include "src/gui/shell/settingsrow.h"
@@ -698,6 +699,9 @@ static void confirm_cb(lv_event_t *e) {
 
 	clock_set(year, month, day, hour, minute);
 	topbar_refresh_clock();
+	// With a clock, the nightly window can finally be evaluated: re-check it
+	// and the tick here rather than waiting for a playback-status change.
+	player_sleep_timer_sync();
 
 	power_hold_screen_on(false);
 	power_notify_activity();

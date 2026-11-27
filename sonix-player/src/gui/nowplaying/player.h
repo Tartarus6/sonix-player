@@ -24,6 +24,11 @@ void player_refresh_now_playing(void);
 // Redraws only the artist line, after "Use track artist" has been switched.
 void player_refresh_artist(void);
 
+// Re-evaluates the automatic sleep window and the sleep timer tick now. Call
+// after changing the automatic setting or the clock: playback may have started
+// while the option was off, and the tick may have been paused ever since.
+void player_sleep_timer_sync(void);
+
 // Reads the lyrics of `path` again, once an .lrc has been saved beside it, and
 // brings their page in when it is the file playing.
 void player_lyrics_reload(const char *path);

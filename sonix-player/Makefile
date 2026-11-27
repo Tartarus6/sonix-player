@@ -229,15 +229,27 @@ HOST_OBJS = $(APP_SRCS:src/%.c=build_host/%.o) $(APP_CXX_SRCS:src/%.cpp=build_ho
 TARGET_OBJS = $(APP_SRCS:src/%.c=build_target/%.o) $(APP_CXX_SRCS:src/%.cpp=build_target/%.opp) \
 			  $(LVGL_SRCS:$(LVGL_DIR)/%.c=build_target/lvgl/%.o)
 
-.PHONY: all host target clean compile_commands.json
+.PHONY: all host target clean compile_commands.json test-autosleep
 
 all: host compile_commands.json
 
-host: $(HOST_BIN) compile_commands.json
+host: test-autosleep $(HOST_BIN) compile_commands.json
 
 $(HOST_BIN): $(HOST_OBJS)
 	$(HOST_LD) -o $@ $(HOST_OBJS) $(HOST_LDFLAGS)
 	@echo "Host build complete: Run './$(HOST_BIN)' to start the simulator."
+
+# Unit test for the sleep timer. It uses a virtual monotonic clock, so the
+# test's clock_gettime must replace the libc one at link time (--wrap). Run with
+# `make test-autosleep` from this directory; `make host` (and so `make all`)
+# runs it too, so a normal build cannot silently break the timer.
+TEST_AUTOSLEEP_BIN = build_host/test_autosleep
+test-autosleep: $(TEST_AUTOSLEEP_BIN)
+	./$(TEST_AUTOSLEEP_BIN)
+
+$(TEST_AUTOSLEEP_BIN): tests/test_autosleep.c src/system/playback/sleeptimer.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DHOST_BUILD=1 -Wl,--wrap=clock_gettime -o $@ $^ -lpthread
 
 # The key that opens streaming-keys.bin (src/system/streaming/streamkeys.h),
 # kept outside git and compiled into streamkeys.c. The header is rewritten only

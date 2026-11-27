@@ -28,6 +28,7 @@
 #include "src/system/device/power.h"
 #include "src/system/device/screenshot.h"
 #include "src/system/device/system.h"
+#include "src/system/playback/sleeptimer.h"
 
 lv_obj_t *settings_screen;
 
@@ -46,6 +47,76 @@ static void headset_toggled_cb(lv_event_t *e) {
 }
 
 // Firmware update lives on the System page; see systempage.c.
+
+// ---------------------------------------------------------------------------
+// Nightly automatic sleep timer. The two time rows borrow the duration wheels:
+// they already run 0-23 and 00-59. Their own switches are hidden because one
+// switch governs the whole window.
+// ---------------------------------------------------------------------------
+static lv_obj_t *auto_sleep_switch;
+static settingsrow_duration_t auto_start_row;
+static settingsrow_duration_t auto_end_row;
+
+static void auto_sleep_refresh(void) {
+	if (!auto_sleep_switch) {
+		return;
+	}
+	sleeptimer_auto_t value;
+	sleeptimer_auto_get(&value);
+	if (value.enabled) {
+		lv_obj_add_state(auto_sleep_switch, LV_STATE_CHECKED);
+	} else {
+		lv_obj_remove_state(auto_sleep_switch, LV_STATE_CHECKED);
+	}
+	lv_obj_set_hidden(auto_start_row.card, !value.enabled);
+	lv_obj_set_hidden(auto_end_row.card, !value.enabled);
+}
+
+static void auto_sleep_toggle_cb(lv_event_t *e) {
+	(void)e;
+	sleeptimer_auto_t value;
+	sleeptimer_auto_get(&value);
+	value.enabled = lv_obj_has_state(auto_sleep_switch, LV_STATE_CHECKED);
+	sleeptimer_auto_set(&value);
+	player_sleep_timer_sync();
+	auto_sleep_refresh();
+}
+
+static void auto_sleep_start_cb(lv_event_t *e) {
+	(void)e;
+	sleeptimer_auto_t value;
+	sleeptimer_auto_get(&value);
+	value.start = settingsrow_duration_minutes(&auto_start_row);
+	sleeptimer_auto_set(&value);
+	player_sleep_timer_sync();
+}
+
+static void auto_sleep_end_cb(lv_event_t *e) {
+	(void)e;
+	sleeptimer_auto_t value;
+	sleeptimer_auto_get(&value);
+	value.end = settingsrow_duration_minutes(&auto_end_row);
+	sleeptimer_auto_set(&value);
+	player_sleep_timer_sync();
+}
+
+static void build_auto_sleep_rows(lv_obj_t *container) {
+	settingsrow_toggle(container, "auto_sleep_timer", &auto_sleep_switch, auto_sleep_toggle_cb);
+
+	settingsrow_toggle_duration(container, "auto_sleep_start", NULL, auto_sleep_start_cb, &auto_start_row);
+	settingsrow_duration_expanded(&auto_start_row, true);
+	lv_obj_set_hidden(auto_start_row.toggle, true);
+
+	settingsrow_toggle_duration(container, "auto_sleep_end", NULL, auto_sleep_end_cb, &auto_end_row);
+	settingsrow_duration_expanded(&auto_end_row, true);
+	lv_obj_set_hidden(auto_end_row.toggle, true);
+
+	sleeptimer_auto_t value;
+	sleeptimer_auto_get(&value);
+	settingsrow_duration_set_minutes(&auto_start_row, value.start);
+	settingsrow_duration_set_minutes(&auto_end_row, value.end);
+	auto_sleep_refresh();
+}
 
 // ---------------------------------------------------------------------------
 // Screen: the panel brightness, a continuous slider written straight to the
@@ -555,6 +626,7 @@ void settings_init(gui_config_t *cfg) {
 	settingsrow_add(container, "settings_keyboard", NULL, switch_screen_cb, keyboard_screen);
 
 	settingsrow_heading(container, "settings_section_device");
+	build_auto_sleep_rows(container);
 	settingsrow_add(container, "date_and_time", NULL, clock_clicked_cb, NULL);
 	settingsrow_add(container, "power", NULL, switch_screen_cb, powersettings_screen);
 	settingsrow_add(container, "system", NULL, switch_screen_cb, systempage_screen);

@@ -701,6 +701,29 @@ static sleeptimer_kind_t sleeptimer_kind_playing(void) {
 	return SLEEPTIMER_MUSIC;
 }
 
+static void sync_sleep_timer(bool playing) {
+	if (!sleep_timer) {
+		return;
+	}
+	// The nightly window can open while music or a book is already playing.
+	// Keep the slow tick alive for the automatic option even before a stretch is
+	// armed, but not for a source the option can never arm (or without a clock).
+	if (sleeptimer_tick_needed(playing)) {
+		lv_timer_resume(sleep_timer);
+	} else {
+		lv_timer_pause(sleep_timer);
+	}
+}
+
+void player_sleep_timer_sync(void) {
+	// Settings and the clock change outside the playback-status path, so ask
+	// about the window again before deciding on the tick. Without this, turning
+	// the switch on during a track arms nothing until the next status change,
+	// and the paused tick never gets the chance to run at all.
+	sleeptimer_check_auto();
+	sync_sleep_timer(audio_get_status() == AUDIO_STATUS_PLAYING);
+}
+
 static void apply_playback_status(audio_status_t status) {
 	bool playing = (status == AUDIO_STATUS_PLAYING);
 
@@ -749,13 +772,7 @@ static void apply_playback_status(audio_status_t status) {
 	// told without being told twice. It is also the one place that knows what
 	// is playing well enough to say which of the three it belongs to.
 	sleeptimer_note_playing(playing ? sleeptimer_kind_playing() : SLEEPTIMER_COUNT);
-	if (sleep_timer) {
-		if (sleeptimer_any_running()) {
-			lv_timer_resume(sleep_timer);
-		} else {
-			lv_timer_pause(sleep_timer);
-		}
-	}
+	sync_sleep_timer(playing);
 }
 
 // "3/24": which track of the queue is playing.
@@ -4651,6 +4668,7 @@ void player_output_unplugged(const char *what) {
 // of falling asleep to something is finding it where it was in the morning.
 static void sleep_timer_cb(lv_timer_t *timer) {
 	(void)timer;
+	sleeptimer_check_auto();
 	bool expired = false;
 	for (int i = 0; i < SLEEPTIMER_COUNT; i++) {
 		expired = sleeptimer_expired((sleeptimer_kind_t)i) || expired;
