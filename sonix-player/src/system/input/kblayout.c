@@ -179,6 +179,15 @@ static const layout_info_t layouts[KB_LAYOUT_COUNT] = {
 						   {T9_LATIN_LOWER},
 						   {T9_LATIN_UPPER},
 						   "Japanese"},
+	[KB_LAYOUT_NORWEGIAN] = {"Norsk",
+						   {"qwertyuiop\xc3\xa5", "asdfghjkl\xc3\xb8\xc3\xa6", "zxcvbnm"},
+						   {"QWERTYUIOP\xc3\x85", "ASDFGHJKL\xc3\x98\xc3\x86", "ZXCVBNM"},
+						   // Keep the Norwegian vowels with their closest Latin phone keys.
+						   {".,?!\'", "abc\xc3\xa6\xc3\xa5", "def", "ghi", "jkl", "mno\xc3\xb8", "pqrs", "tuv",
+							"wxyz"},
+						   {".,?!\'", "ABC\xc3\x86\xc3\x85", "DEF", "GHI", "JKL", "MNO\xc3\x98", "PQRS", "TUV",
+							"WXYZ"},
+						   "Norsk"},
 };
 
 // The letters a held key offers, the way a phone keyboard does: one entry per
@@ -225,7 +234,8 @@ static const struct {
 
 // The config file keeps names, not indices.
 static const char *const layout_keys[KB_LAYOUT_COUNT] = {"english", "italian", "german", "spanish",	 "french", "russian",
-														 "ukrainian", "dutch",   "polish",  "portuguese", "czech", "japanese"};
+														 "ukrainian", "dutch",   "polish",  "portuguese", "czech", "japanese",
+														 "norwegian"};
 
 static uint8_t in_use[KB_LAYOUT_COUNT];
 static uint8_t in_use_n;
