@@ -4,6 +4,7 @@
 
 #include "src/gui/audio/dacpage.h"
 #include "src/gui/audio/metronomepage.h"
+#include "src/gui/calculator/calculatorpage.h"
 #include "src/gui/ebook/ebookpage.h"
 #include "src/gui/flappybird/flappybird.h"
 #include "src/gui/library/filespage.h"
@@ -33,13 +34,16 @@ void morepage_init(gui_config_t *cfg) {
 		// An action: the artwork is read from the resource tree on the way in.
 		{"flappy_bird", &icon_menu_flappy_bird, NULL, flappybird_open},
 		{"metronome", &icon_menu_metronome, &metronomepage_screen, NULL},
+		{"calculator", &icon_menu_calculator, &calculatorpage_screen, NULL},
 	};
 
 	// Two columns by three rows, like the Music and Wireless pages, so a tile
 	// here is exactly the size of a tile there. The grid is laid out as full
 	// even with fewer entries, so the only tile sits where it would with six --
 	// top left -- instead of floating in the middle of a page of its own.
-	gridpage_build(morepage_screen, cfg, entries, (int)(sizeof(entries) / sizeof(entries[0])), 2, 3, true);
+	lv_obj_t *grid =
+		gridpage_build(morepage_screen, cfg, entries, (int)(sizeof(entries) / sizeof(entries[0])), 2, 3, true);
+	gridpage_set_scrolling(grid);
 
 	settingsrow_title(morepage_screen, cfg, "more");
 }
