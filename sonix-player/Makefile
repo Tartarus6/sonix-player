@@ -496,7 +496,8 @@ $(OPUSFILE_LIB): $(CROSS_CC) $(OGG_LIB) $(OPUS_LIB)
 
 # --enable-legacy: also reads the .wv written by WavPack 4.0 and earlier, which
 # costs a few kilobytes. --enable-dsd keeps DSD inside WavPack, which the
-# wrapper opens with OPEN_DSD_AS_PCM. --disable-asm because the assembly wavpack
+# wrapper opens with OPEN_DSD_NATIVE and hands to the DSD output stage.
+# --disable-asm because the assembly wavpack
 # ships is for x86 and ARM.
 $(WAVPACK_LIB): $(CROSS_CC)
 	@echo "Building static libwavpack $(WAVPACK_VER) for the target..."
