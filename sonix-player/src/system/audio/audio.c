@@ -3210,6 +3210,58 @@ typedef struct {
 	bool dropped_while_waiting;
 } decoded_seek_t;
 
+// Called without audio_mutex. False tells the playback loop to handle a
+// command instead of seeking to the chapter.
+static bool wait_for_seek_download(decoder_t *dec, const char *filepath, snd_pcm_t *pcm_handle, int sample_rate,
+		uint64_t target_frame, bool preview, uint64_t was_at, long retry_bytes, bool *dropped_pcm) {
+	fprintf(stderr, "audio[%ld]: the requested point has not downloaded yet: waiting for it\n", log_ms());
+	// Let Bluetooth drain instead of dropping its transport. The next
+	// chapter tap can replace this wait and use the same PCM.
+	if (pcm_handle && (preview || !pcm_is_bluetooth(pcm_handle))) {
+		snd_pcm_drop(pcm_handle);
+		*dropped_pcm = true;
+	}
+
+	pthread_mutex_lock(&audio_mutex);
+	if (!play_request && !seek_request && audio_command != AUDIO_CMD_STOP) {
+		if (preview) {
+			progress_current_secs = (double)target_frame / sample_rate;
+		} else {
+			chapter_waiting_for_download = true;
+		}
+	}
+	pthread_mutex_unlock(&audio_mutex);
+
+	while (true) {
+		pthread_mutex_lock(&audio_mutex);
+		bool replaced = play_request || seek_request;
+		bool running = audio_command == AUDIO_CMD_PLAY || (!preview && audio_command == AUDIO_CMD_RESUME);
+		bool leave = replaced || !running;
+		if (!preview && leave && !replaced && audio_command == AUDIO_CMD_PAUSE) {
+			// Let pause close the output. Resume retries the same chapter.
+			seek_request = true;
+		} else if (leave) {
+			chapter_waiting_for_download = false;
+		}
+		pthread_mutex_unlock(&audio_mutex);
+		if (leave) {
+			if (!preview) {
+				return false;
+			}
+			// An interrupted scrub still seeks to the available audio.
+			break;
+		}
+		if (!seek_waits_for_bytes(dec, filepath, target_frame, decoder_seekable_limit(dec), preview, was_at, retry_bytes)) {
+			break;
+		}
+		usleep(100 * 1000);
+	}
+	pthread_mutex_lock(&audio_mutex);
+	chapter_waiting_for_download = false;
+	pthread_mutex_unlock(&audio_mutex);
+	return true;
+}
+
 // Called with audio_mutex held and a pending seek. Only NOT_RUN leaves the
 // mutex held, so the caller can handle pause/resume under the same lock.
 static decoded_seek_result_t try_decoded_seek(decoder_t *dec, const char *filepath, snd_pcm_t *pcm_handle, int sample_rate, uint64_t total_frames, bool is_paused, int64_t bytes_played, int frame_bytes, decoded_seek_t *seek) {
@@ -3251,51 +3303,9 @@ static decoded_seek_result_t try_decoded_seek(decoder_t *dec, const char *filepa
 	uint64_t reachable = decoder_seekable_limit(dec);
 	bool dropped_while_waiting = false;
 	if (!paused_chapter_ready && seek_waits_for_bytes(dec, filepath, target_frame, reachable, preview, was_at, retry_bytes)) {
-		fprintf(stderr, "audio[%ld]: the requested point has not downloaded yet: waiting for it\n", log_ms());
-		// Let Bluetooth drain instead of dropping its transport. The next
-		// chapter tap can replace this wait and use the same PCM.
-		if (pcm_handle && (preview || !pcm_is_bluetooth(pcm_handle))) {
-			snd_pcm_drop(pcm_handle);
-			dropped_while_waiting = true;
+		if (!wait_for_seek_download(dec, filepath, pcm_handle, sample_rate, target_frame, preview, was_at, retry_bytes, &dropped_while_waiting)) {
+			return DECODED_SEEK_RECHECK;
 		}
-
-		pthread_mutex_lock(&audio_mutex);
-		if (!play_request && !seek_request && audio_command != AUDIO_CMD_STOP) {
-			if (preview) {
-				progress_current_secs = (double)target_frame / sample_rate;
-			} else {
-				chapter_waiting_for_download = true;
-			}
-		}
-		pthread_mutex_unlock(&audio_mutex);
-
-		while (true) {
-			pthread_mutex_lock(&audio_mutex);
-			bool replaced = play_request || seek_request;
-			bool running = audio_command == AUDIO_CMD_PLAY || (!preview && audio_command == AUDIO_CMD_RESUME);
-			bool leave = replaced || !running;
-			if (!preview && leave && !replaced && audio_command == AUDIO_CMD_PAUSE) {
-				// Let pause close the output. Resume retries the same chapter.
-				seek_request = true;
-			} else if (leave) {
-				chapter_waiting_for_download = false;
-			}
-			pthread_mutex_unlock(&audio_mutex);
-			if (leave) {
-				if (!preview) {
-					return DECODED_SEEK_RECHECK;
-				}
-				break;
-			}
-			reachable = decoder_seekable_limit(dec);
-			if (!seek_waits_for_bytes(dec, filepath, target_frame, reachable, preview, was_at, retry_bytes)) {
-				break;
-			}
-			usleep(100 * 1000);
-		}
-		pthread_mutex_lock(&audio_mutex);
-		chapter_waiting_for_download = false;
-		pthread_mutex_unlock(&audio_mutex);
 		reachable = decoder_seekable_limit(dec);
 	}
 	// A scrub may land short if the stream ends early; a chapter cannot.
