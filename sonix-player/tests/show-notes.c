@@ -101,6 +101,13 @@ int main(void) {
 			   "<h4>Links and Show Notes:</h4><h5><a href='https://example.test/first'>First link</a></h5> "
 			   "<h5><a href='https://example.test/second'>Second link</a></h5>]]></description></item></channel></rss>";
 	expect_note(feed.id, second, "Links and Show Notes:\n\nFirst link\n\nSecond link");
+	response = "<rss><channel><item><guid>second &amp; latest</guid><description><![CDATA["
+			   "Before<object>outer<object>inner</object>still hidden</object> after.\r\n"
+			   "&amp; &unknown; \xC3!]]></description></item></channel></rss>";
+	expect_note(feed.id, second, "Before after.\n& &unknown; \xEF\xBF\xBD!");
+	response = "<rss><channel><item><guid>second &amp; latest</guid>"
+			   "<description>&#65; &#xE9; &#x20AC; &#x1F3A7;</description></item></channel></rss>";
+	expect_note(feed.id, second, "A é € 🎧");
 	response = NULL;
 	fixture = NULL;
 	assert(podcastrss_episode_notes(feed.id, second, &text) == PODCAST_NOTES_ERROR && !text);
