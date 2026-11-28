@@ -116,7 +116,7 @@ static void read_chapter_title(const uint8_t *payload, uint32_t len, bool syncsa
 	}
 }
 
-int id3chap_read(const char *path, id3chap_t *out, int max) {
+static int read_chapters(const char *path, id3chap_t *out, int max, int limit) {
 	if (!path || !path[0]) {
 		return 0;
 	}
@@ -168,7 +168,7 @@ int id3chap_read(const char *path, id3chap_t *out, int max) {
 	bool syncsafe_frames = version >= 4;
 	int found = 0;
 
-	while (at + 10 <= tag_size && found < MAX_CHAPTERS) {
+	while (at + 10 <= tag_size && found < limit) {
 		const uint8_t *frame = tag + at;
 		if (!frame[0]) {
 			break; // padding: the rest of the tag is zeroes
@@ -192,9 +192,6 @@ int id3chap_read(const char *path, id3chap_t *out, int max) {
 					read_chapter_title(tag + at, size, syncsafe_frames, out[found].title, sizeof(out[found].title));
 				}
 				found++;
-				if (!out) {
-					break; // only asked whether there are any
-				}
 			}
 		}
 		at += size;
@@ -204,4 +201,6 @@ int id3chap_read(const char *path, id3chap_t *out, int max) {
 	return found;
 }
 
-bool id3chap_present(const char *path) { return id3chap_read(path, NULL, 0) > 0; }
+int id3chap_read(const char *path, id3chap_t *out, int max) { return read_chapters(path, out, max, MAX_CHAPTERS); }
+
+bool id3chap_present(const char *path) { return read_chapters(path, NULL, 0, 1) > 0; }
