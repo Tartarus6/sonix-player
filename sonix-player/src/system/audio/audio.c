@@ -293,6 +293,7 @@ static volatile bool playback_context_active = false;
 static bool restart_fresh_pending = false;
 static char restart_fresh_path[512];
 static double restart_fresh_pos;
+static bool restart_fresh_preview;
 
 // ---------------------------------------------------------------------------
 // Re-initialising the output route after waking from mem.
@@ -516,6 +517,8 @@ static bool stop_thread = false;
 
 static double seek_target_secs = -1.0;
 static bool seek_request = false;
+static bool seek_preview = true;
+static bool chapter_waiting_for_download; // protected by audio_mutex
 
 // Set true by the playback thread when a track plays through to its end (as
 // opposed to being stopped/replaced by the user). Consumed via
@@ -540,6 +543,8 @@ static void mark_stopped_unless_replaced(void) {
 }
 
 static double progress_current_secs = 0.0;
+// A chapter can move the paused playhead without listening to the episode.
+static bool progress_unheard_chapter;
 
 // Where the bar was when the track was paused.
 //
@@ -561,7 +566,13 @@ static double progress_floor_secs = -1.0;
 // until the seek is reached drew the bar at the start and back. Caller holds
 // audio_mutex.
 static double opening_position(void) {
-	return seek_request && seek_target_secs > 0 ? seek_target_secs : 0.0;
+	if (!seek_request) {
+		return 0.0;
+	}
+	if (!seek_preview) {
+		return progress_current_secs;
+	}
+	return seek_target_secs > 0 ? seek_target_secs : 0.0;
 }
 
 // The position after a block has gone out, unless a seek has been asked for
@@ -569,8 +580,9 @@ static double opening_position(void) {
 // being written when it arrived belongs to the old position. Caller holds
 // audio_mutex.
 static void report_position(double seconds) {
-	if (!seek_request) {
+	if (!seek_request && !play_request) {
 		progress_current_secs = seconds;
+		progress_unheard_chapter = false;
 	}
 }
 
@@ -3167,6 +3179,162 @@ static int bluetooth_decimation(int sample_rate, int channels, int out_bits, boo
 	return sink_rate ? decimate_factor_for(sample_rate, (int)sink_rate) : 1;
 }
 
+static bool seek_waits_for_bytes(decoder_t *dec, const char *path, uint64_t target, uint64_t reachable, bool preview, uint64_t played_frame, long retry_bytes) {
+	if (preview) {
+		return reachable > 0 && target > reachable && decoder_is_growing(dec);
+	}
+	if (target == 0 || !growfile_is_growing(path)) {
+		return false;
+	}
+	long available;
+	if (!decoder_grow_span(dec, &available, NULL)) {
+		// Without a length, only the part we've played is known to be present.
+		return retry_bytes >= 0 || target > played_frame;
+	}
+	// Let the file gain another read window before retrying a failed scan.
+	return target > reachable || (retry_bytes >= 0 && available - retry_bytes < 64 * 1024);
+}
+
+typedef enum {
+	DECODED_SEEK_NOT_RUN,
+	DECODED_SEEK_RECHECK,
+	DECODED_SEEK_FINISHED,
+} decoded_seek_result_t;
+
+typedef struct {
+	double retry_target;
+	long retry_bytes; // readable prefix at the last failed chapter seek
+	uint64_t frame;
+	bool preview;
+	bool paused_ready;
+	bool dropped_while_waiting;
+} decoded_seek_t;
+
+// Called with audio_mutex held and a pending seek. Only NOT_RUN leaves the
+// mutex held, so the caller can handle pause/resume under the same lock.
+static decoded_seek_result_t try_decoded_seek(decoder_t *dec, const char *filepath, snd_pcm_t *pcm_handle, int sample_rate, uint64_t total_frames, bool is_paused, int64_t bytes_played, int frame_bytes, decoded_seek_t *seek) {
+	bool paused_chapter_ready = false;
+	uint64_t was_at = (uint64_t)(bytes_played / frame_bytes);
+	if (!seek_preview && audio_command == AUDIO_CMD_PAUSE && is_paused) {
+		// Check the cache outside audio_mutex: its reader can call back
+		// into the audio thread's command state while holding its lock.
+		double target = seek_target_secs;
+		long retry_bytes = target == seek->retry_target ? seek->retry_bytes : -1;
+		pthread_mutex_unlock(&audio_mutex);
+		paused_chapter_ready = !seek_waits_for_bytes(dec, filepath, (uint64_t)(target * sample_rate), decoder_seekable_limit(dec), false, was_at, retry_bytes);
+		pthread_mutex_lock(&audio_mutex);
+		if (play_request || !seek_request || seek_preview || audio_command != AUDIO_CMD_PAUSE || seek_target_secs != target) {
+			pthread_mutex_unlock(&audio_mutex);
+			return DECODED_SEEK_RECHECK; // a newer command wins
+		}
+		chapter_waiting_for_download = !paused_chapter_ready;
+	}
+	if (!seek_preview && !paused_chapter_ready && (audio_command != AUDIO_CMD_PLAY || is_paused)) {
+		return DECODED_SEEK_NOT_RUN;
+	}
+
+	double target = seek_target_secs;
+	bool preview = seek_preview;
+	long retry_bytes = !preview && target == seek->retry_target ? seek->retry_bytes : -1;
+	if (retry_bytes < 0) {
+		seek->retry_target = -1.0;
+	}
+	seek_request = false;
+	chapter_waiting_for_download = false;
+	pthread_mutex_unlock(&audio_mutex);
+
+	uint64_t target_frame = (uint64_t)(target * sample_rate);
+	if (preview && target_frame > total_frames) {
+		target_frame = total_frames;
+	}
+
+	uint64_t reachable = decoder_seekable_limit(dec);
+	bool dropped_while_waiting = false;
+	if (!paused_chapter_ready && seek_waits_for_bytes(dec, filepath, target_frame, reachable, preview, was_at, retry_bytes)) {
+		fprintf(stderr, "audio[%ld]: the requested point has not downloaded yet: waiting for it\n", log_ms());
+		// Let Bluetooth drain instead of dropping its transport. The next
+		// chapter tap can replace this wait and use the same PCM.
+		if (pcm_handle && (preview || !pcm_is_bluetooth(pcm_handle))) {
+			snd_pcm_drop(pcm_handle);
+			dropped_while_waiting = true;
+		}
+
+		pthread_mutex_lock(&audio_mutex);
+		if (!play_request && !seek_request && audio_command != AUDIO_CMD_STOP) {
+			if (preview) {
+				progress_current_secs = (double)target_frame / sample_rate;
+			} else {
+				chapter_waiting_for_download = true;
+			}
+		}
+		pthread_mutex_unlock(&audio_mutex);
+
+		while (true) {
+			pthread_mutex_lock(&audio_mutex);
+			bool replaced = play_request || seek_request;
+			bool running = audio_command == AUDIO_CMD_PLAY || (!preview && audio_command == AUDIO_CMD_RESUME);
+			bool leave = replaced || !running;
+			if (!preview && leave && !replaced && audio_command == AUDIO_CMD_PAUSE) {
+				// Let pause close the output. Resume retries the same chapter.
+				seek_request = true;
+			} else if (leave) {
+				chapter_waiting_for_download = false;
+			}
+			pthread_mutex_unlock(&audio_mutex);
+			if (leave) {
+				if (!preview) {
+					return DECODED_SEEK_RECHECK;
+				}
+				break;
+			}
+			reachable = decoder_seekable_limit(dec);
+			if (!seek_waits_for_bytes(dec, filepath, target_frame, reachable, preview, was_at, retry_bytes)) {
+				break;
+			}
+			usleep(100 * 1000);
+		}
+		pthread_mutex_lock(&audio_mutex);
+		chapter_waiting_for_download = false;
+		pthread_mutex_unlock(&audio_mutex);
+		reachable = decoder_seekable_limit(dec);
+	}
+	// A scrub may land short if the stream ends early; a chapter cannot.
+	if (preview && reachable > 0 && target_frame > reachable) {
+		target_frame = reachable;
+	}
+
+	int (*seek_frame)(decoder_t *, uint64_t) = preview ? decoder_seek_to_frame : decoder_seek_mp3_unclamped;
+	long attempted_bytes = 0;
+	if (!preview) {
+		decoder_grow_span(dec, &attempted_bytes, NULL);
+	}
+	if (!seek_frame(dec, target_frame)) {
+		bool still_downloading = !preview && growfile_is_growing(filepath);
+		seek_frame(dec, was_at);
+		if (still_downloading) {
+			pthread_mutex_lock(&audio_mutex);
+			if (!play_request && !seek_request && audio_command != AUDIO_CMD_STOP) {
+				// The byte estimate was optimistic. Keep the jump pending.
+				seek->retry_target = target;
+				seek->retry_bytes = attempted_bytes;
+				seek_request = true;
+				chapter_waiting_for_download = true;
+			}
+			pthread_mutex_unlock(&audio_mutex);
+			return DECODED_SEEK_RECHECK;
+		}
+		target_frame = was_at;
+	}
+	*seek = (decoded_seek_t){
+		.retry_target = -1.0,
+		.frame = target_frame,
+		.preview = preview,
+		.paused_ready = paused_chapter_ready,
+		.dropped_while_waiting = dropped_while_waiting,
+	};
+	return DECODED_SEEK_FINISHED;
+}
+
 static void play_decoded_file(const char *filepath, decode_format_t format) {
 	decoder_t *dec = decoder_open(filepath, format);
 	if (!dec) {
@@ -3362,8 +3530,10 @@ static void play_decoded_file(const char *filepath, decode_format_t format) {
 	// or was cut short (cut_short, below), so the queue would advance on its
 	// own mid-book.
 	int64_t bytes_played = 0;
+	uint64_t chapter_start_frame = 0;
 	bool is_paused = false;
 	bool played_to_the_end = false;
+	decoded_seek_t seek = {.retry_target = -1.0};
 	int route_check = 0;
 	int track_route = alsa_output_key(); // the output auto_set_output just applied
 
@@ -3383,78 +3553,14 @@ static void play_decoded_file(const char *filepath, decode_format_t format) {
 			pthread_mutex_unlock(&audio_mutex);
 			break;
 		}
+		decoded_seek_result_t result = DECODED_SEEK_NOT_RUN;
 		if (seek_request) {
-			double target = seek_target_secs;
-			seek_request = false;
-			pthread_mutex_unlock(&audio_mutex);
-
-			uint64_t target_frame = (uint64_t)(target * sample_rate);
-			if (target_frame > total_frames) {
-				target_frame = total_frames;
-			}
-
-			// The requested point may not have downloaded yet. Clamping the
-			// request to where the download has reached would mean asking for
-			// 1:17 and landing at 0:51; a streaming app does the other thing --
-			// it stops on the requested point, downloads up to it, and resumes
-			// from there.
-			//
-			// So when the requested point is past the edge, wait for the edge
-			// to reach it -- progress bar parked on the requested point, card
-			// silent, and the wait giving up on any command (including another
-			// seek: the last touch always wins).
-			uint64_t reachable = decoder_seekable_limit(dec);
-			bool dropped_while_waiting = false;
-			if (reachable > 0 && target_frame > reachable && decoder_is_growing(dec)) {
-				fprintf(stderr, "audio[%ld]: the requested point has not downloaded yet: waiting for it\n", log_ms());
-				// Silence while waiting, when there is a stream to silence: a
-				// seek can arrive with the device handed back.
-				if (pcm_handle) {
-					snd_pcm_drop(pcm_handle);
-					dropped_while_waiting = true;
-				}
-
-				// The bar sits on the requested point: that is where this is going.
-				pthread_mutex_lock(&audio_mutex);
-				progress_current_secs = (double)target_frame / sample_rate;
-				pthread_mutex_unlock(&audio_mutex);
-
-				while (true) {
-					pthread_mutex_lock(&audio_mutex);
-					bool leave = audio_command != AUDIO_CMD_PLAY || play_request || seek_request;
-					pthread_mutex_unlock(&audio_mutex);
-					if (leave) {
-						break; // the top of the loop handles it
-					}
-					if (!decoder_is_growing(dec)) {
-						break; // finished (or died): go as far as possible
-					}
-					reachable = decoder_seekable_limit(dec);
-					if (reachable >= target_frame) {
-						fprintf(stderr, "audio[%ld]: the requested point has downloaded, resuming from there\n", log_ms());
-						break;
-					}
-					usleep(100 * 1000);
-				}
-				reachable = decoder_seekable_limit(dec);
-			}
-			// As far as is reachable now: if the wait was interrupted (or the
-			// download died) this is still the closest point to the requested
-			// one that actually exists.
-			if (reachable > 0 && target_frame > reachable) {
-				target_frame = reachable;
-			}
-
-			// If the seek fails -- which happens on a file still downloading
-			// when the requested point has not arrived -- go back to where the
-			// decoder was rather than leaving it nowhere: the music carries on
-			// from where it was, far better than playback dying for good.
-			uint64_t was_at = (uint64_t)(bytes_played / frame_bytes);
-			if (!decoder_seek_to_frame(dec, target_frame)) {
-				if (decoder_seek_to_frame(dec, was_at)) {
-					target_frame = was_at;
-				}
-			}
+			result = try_decoded_seek(dec, filepath, pcm_handle, sample_rate, total_frames, is_paused, bytes_played, frame_bytes, &seek);
+		}
+		if (result == DECODED_SEEK_RECHECK) {
+			continue;
+		}
+		if (result == DECODED_SEEK_FINISHED) {
 			// What it is holding belongs to the part of the book just left.
 			speed_reset(stretch);
 			// Same for the crossfeed delay line: it holds half a millisecond of
@@ -3472,15 +3578,23 @@ static void play_decoded_file(const char *filepath, decode_format_t format) {
 
 			// As in the WAV loop above: no device means no stream to flush, and
 			// asking alsa to drop a null one aborts the audio thread.
-			if (pcm_handle) {
-				seek_flush(pcm_handle, dropped_while_waiting);
+			if (pcm_handle && !seek.paused_ready) {
+				seek_flush(pcm_handle, seek.dropped_while_waiting);
 				is_paused = false;
 				bt_seek_probe_arm(pcm_handle);
 			}
 
-			bytes_played = (int64_t)(target_frame * frame_bytes);
+			bytes_played = (int64_t)(seek.frame * frame_bytes);
+			chapter_start_frame = seek.preview ? 0 : seek.frame;
+			// A playing chapter normally waits for PCM before moving the bar.
+			// While paused, show a landed jump but don't count it as listening.
 			pthread_mutex_lock(&audio_mutex);
-			progress_current_secs = (double)bytes_played / bytes_per_sec;
+			if (!play_request && !seek_request && (seek.preview || audio_command == AUDIO_CMD_PAUSE)) {
+				progress_current_secs = (double)bytes_played / bytes_per_sec;
+				if (!seek.preview) {
+					progress_unheard_chapter = true;
+				}
+			}
 			pthread_mutex_unlock(&audio_mutex);
 			continue;
 		}
@@ -3501,7 +3615,13 @@ static void play_decoded_file(const char *filepath, decode_format_t format) {
 					uint64_t played_frames = (uint64_t)(bytes_played / frame_bytes);
 					uint64_t rewind_frames = (uint64_t)(rewind_bytes / frame_bytes);
 					uint64_t resume_frame = played_frames > rewind_frames ? played_frames - rewind_frames : 0;
-					if (decoder_seek_to_frame(dec, resume_frame)) {
+					// Bluetooth may still have audio from before the chapter jump.
+					// Those frames do not belong to the new decoder position.
+					if (resume_frame < chapter_start_frame) {
+						resume_frame = chapter_start_frame;
+					}
+					bool rewound = chapter_start_frame ? resume_frame < played_frames && decoder_seek_mp3_unclamped(dec, resume_frame) : decoder_seek_to_frame(dec, resume_frame);
+					if (rewound) {
 						if (decim_factor > 1) {
 							decimate_reset(&decim);
 						}
@@ -3609,6 +3729,11 @@ static void play_decoded_file(const char *filepath, decode_format_t format) {
 				is_paused = false;
 				playback_status = AUDIO_STATUS_PLAYING;
 			}
+		}
+		if (seek_request) {
+			// Apply a queued chapter before writing any more audio after resume.
+			pthread_mutex_unlock(&audio_mutex);
+			continue;
 		}
 		pthread_mutex_unlock(&audio_mutex);
 
@@ -4125,6 +4250,7 @@ int audio_play(const char *filepath) {
 
 	pthread_mutex_lock(&audio_mutex);
 	restart_fresh_pending = false; // an explicit play beats the armed restart
+	chapter_waiting_for_download = false;
 	strncpy(current_filepath, filepath, sizeof(current_filepath) - 1);
 	play_request = true;
 	play_request_ms = log_ms();
@@ -4137,6 +4263,7 @@ int audio_play(const char *filepath) {
 	// moment, and stale values make the bar jump back to where the previous
 	// track was before snapping to the new one.
 	progress_current_secs = 0.0;
+	progress_unheard_chapter = false;
 	progress_floor_secs = -1.0;
 	progress_total_secs = 0.0;
 	stream_sample_rate = 0;
@@ -4161,7 +4288,7 @@ int audio_play(const char *filepath) {
 // a play followed by a seek because both halves are set under one hold of the
 // mutex: otherwise the playback thread could open the file and push its first
 // second out of the speakers before the seek reached it.
-int audio_play_at(const char *filepath, double start_secs) {
+static int play_at(const char *filepath, double start_secs, bool preview) {
 	fprintf(stderr, "audio[%ld]: play requested '%s' from %.1f s\n", log_ms(), filepath, start_secs);
 
 	pthread_mutex_lock(&audio_mutex);
@@ -4173,11 +4300,14 @@ int audio_play_at(const char *filepath, double start_secs) {
 	write_fail_retry_used = false;
 	audio_command = AUDIO_CMD_PLAY;
 	playback_status = AUDIO_STATUS_PLAYING;
-	if (start_secs > 0) {
-		seek_request = true;
-		seek_target_secs = start_secs;
+	chapter_waiting_for_download = false;
+	seek_preview = preview;
+	seek_request = start_secs > 0;
+	seek_target_secs = start_secs;
+	if (preview) {
+		progress_current_secs = start_secs > 0 ? start_secs : 0;
+		progress_unheard_chapter = false;
 	}
-	progress_current_secs = start_secs > 0 ? start_secs : 0;
 	progress_floor_secs = -1.0;
 	progress_total_secs = 0;
 	pthread_mutex_unlock(&audio_mutex);
@@ -4185,6 +4315,8 @@ int audio_play_at(const char *filepath, double start_secs) {
 	pthread_cond_signal(&audio_cond);
 	return 0;
 }
+
+int audio_play_at(const char *filepath, double start_secs) { return play_at(filepath, start_secs, true); }
 
 int audio_play_paused(const char *filepath, double start_secs) {
 	fprintf(stderr, "audio[%ld]: restore requested '%s' at %.1f s (paused)\n", log_ms(), filepath, start_secs);
@@ -4198,11 +4330,14 @@ int audio_play_paused(const char *filepath, double start_secs) {
 	write_fail_retry_used = false;
 	audio_command = AUDIO_CMD_PAUSE;
 	playback_status = AUDIO_STATUS_PAUSED;
+	chapter_waiting_for_download = false;
 	if (start_secs > 0) {
+		seek_preview = true;
 		seek_request = true;
 		seek_target_secs = start_secs;
 	}
 	progress_current_secs = start_secs > 0 ? start_secs : 0;
+	progress_unheard_chapter = false;
 	progress_floor_secs = -1.0;
 	progress_total_secs = 0;
 	pthread_mutex_unlock(&audio_mutex);
@@ -4293,6 +4428,12 @@ bool audio_suspend_freeze(int timeout_ms) {
 	snprintf(path, sizeof(path), "%s", current_filepath);
 	double pos = progress_current_secs;
 	double total = progress_total_secs;
+	bool chapter_pending = seek_request && !seek_preview;
+	double restart_pos = chapter_pending ? seek_target_secs : pos;
+	if (restart_fresh_pending && !restart_fresh_preview) {
+		chapter_pending = true;
+		restart_pos = restart_fresh_pos;
+	}
 
 	// STOP, exactly as the user would send it, and a wake-up for any waiter.
 	audio_command = AUDIO_CMD_STOP;
@@ -4322,7 +4463,8 @@ bool audio_suspend_freeze(int timeout_ms) {
 		pthread_mutex_lock(&audio_mutex);
 		restart_fresh_pending = true;
 		snprintf(restart_fresh_path, sizeof(restart_fresh_path), "%s", path);
-		restart_fresh_pos = pos;
+		restart_fresh_pos = restart_pos;
+		restart_fresh_preview = !chapter_pending && !progress_unheard_chapter;
 		// The facade stays "paused where you were": the context underneath is
 		// dead, but the next play rebuilds it.
 		playback_status = AUDIO_STATUS_PAUSED;
@@ -4362,10 +4504,11 @@ void audio_resume(void) {
 		char path[512];
 		snprintf(path, sizeof(path), "%s", restart_fresh_path);
 		double pos = restart_fresh_pos;
+		bool preview = restart_fresh_preview;
 		restart_fresh_pending = false;
 		pthread_mutex_unlock(&audio_mutex);
 		fprintf(stderr, "audio: resume after mem -> fresh start of '%s' at %.1f s\n", path, pos);
-		audio_play_at(path, pos);
+		play_at(path, pos, preview);
 		return;
 	}
 	pthread_mutex_unlock(&audio_mutex);
@@ -4391,6 +4534,7 @@ void audio_stop(void) {
 	seek_request = false;
 	seek_target_secs = -1.0;
 	track_completed = false; // deliberate stop is not a natural completion
+	chapter_waiting_for_download = false;
 	pthread_mutex_unlock(&audio_mutex);
 	playback_wake();
 }
@@ -4419,7 +4563,7 @@ void audio_get_current_file(char *out, size_t out_size) {
 	pthread_mutex_unlock(&audio_mutex);
 }
 
-void audio_get_progress(double *current_secs, double *total_secs) {
+bool audio_get_progress(double *current_secs, double *total_secs) {
 	pthread_mutex_lock(&audio_mutex);
 	double current = progress_current_secs;
 	if (progress_floor_secs >= 0.0) {
@@ -4433,7 +4577,16 @@ void audio_get_progress(double *current_secs, double *total_secs) {
 		*current_secs = current;
 	if (total_secs)
 		*total_secs = progress_total_secs;
+	bool heard_position = !progress_unheard_chapter;
 	pthread_mutex_unlock(&audio_mutex);
+	return heard_position;
+}
+
+bool audio_chapter_waiting_for_download(void) {
+	pthread_mutex_lock(&audio_mutex);
+	bool waiting = chapter_waiting_for_download && !play_request && !restart_fresh_pending && playback_status != AUDIO_STATUS_STOPPED;
+	pthread_mutex_unlock(&audio_mutex);
+	return waiting;
 }
 
 void audio_get_stream_info(int *sample_rate, int *channels) {
@@ -4497,25 +4650,42 @@ double audio_get_speed(void) {
 	return value;
 }
 
-void audio_seek(double seconds) {
+static void request_seek(double seconds, bool preview) {
 	printf("seeking to %.2f seconds\n", seconds);
 
 	pthread_mutex_lock(&audio_mutex);
-	progress_current_secs = seconds; // the bar follows the finger, not the decoder
-	progress_floor_secs = -1.0;		// and a deliberate jump outranks the pause floor
-	if (restart_fresh_pending) {
-		// Paused through a suspend: there is no track context to take the
-		// seek, and the play that follows rebuilds one at the saved point.
-		// The point is moved instead, or that play would carry on from where
-		// the pause was and not from where the bar was put.
+	if (preview) {
+		progress_current_secs = seconds; // the bar follows the finger, not the decoder
+	}
+	progress_floor_secs = -1.0; // a deliberate jump outranks the pause floor
+	chapter_waiting_for_download = false;
+	if (restart_fresh_pending && preview) {
+		// The decoder was released at suspend. A scrub can preview its
+		// destination now and defer reopening until the user presses Play.
 		restart_fresh_pos = seconds;
+		restart_fresh_preview = true;
 	} else {
 		seek_target_secs = seconds;
+		seek_preview = preview;
 		seek_request = true;
+		if (restart_fresh_pending) {
+			// A chapter jump must be resolved before the clock moves. Reopen
+			// the decoder in pause, without starting audio.
+			restart_fresh_pending = false;
+			play_request = true;
+			play_request_ms = log_ms();
+			write_fail_retry_used = false;
+			audio_command = AUDIO_CMD_PAUSE;
+			pthread_cond_signal(&audio_cond);
+		}
 	}
 	pthread_mutex_unlock(&audio_mutex);
 	playback_wake();
 }
+
+void audio_seek(double seconds) { request_seek(seconds, true); }
+
+void audio_seek_when_ready(double seconds) { request_seek(seconds, false); }
 
 // ---------------------------------------------------------------------------
 // where the sound goes

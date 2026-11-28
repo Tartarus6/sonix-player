@@ -200,7 +200,6 @@ static lv_obj_t *cover_placeholder_icon;
 static lv_obj_t *prev_btn_obj;
 static lv_obj_t *next_btn_obj;
 static lv_obj_t *more_btn_obj;
-static lv_obj_t *more_btn_icon; // ellipsis on a track, chapters on a book
 static lv_obj_t *repeat_btn_obj;
 static lv_obj_t *speed_btn_obj;	 // stands in the repeat button's place on a book
 static lv_obj_t *speed_btn_icon;
@@ -542,14 +541,6 @@ static void apply_audiobook_mode(bool book, bool podcast) {
 									: forward == AUDIOBOOK_SKIP_LONG ? &icon_next_30
 																	 : &icon_next_10);
 	}
-	// A book has a menu of its own behind the usual glyph: chapters,
-	// bookmarks, summary. On a podcast the same button goes straight to the
-	// episodes, the only thing wanted from it, rather than to a menu whose one
-	// useful entry would always be picked.
-	if (more_btn_icon) {
-		lv_image_set_src(more_btn_icon, podcast && !book ? &icon_podcast_episodes : &icon_ellipsis_vertical);
-	}
-
 	// The star and the repeat mode are about the music library and its queue.
 	// On a book they are not merely useless: starring would write a row into
 	// the music favourites for a file the music library does not index, and
@@ -4189,7 +4180,8 @@ static void update_progress(void) {
 	// poll puts the interpolation back on the playback thread's own figure.
 	progress_anchor_secs = state.progress_current_secs;
 	progress_anchor_tick = lv_tick_get();
-	progress_running = state.status == AUDIO_STATUS_PLAYING && state.progress_total_secs > 0;
+	bool chapter_downloading = !state.live && audio_chapter_waiting_for_download();
+	progress_running = state.status == AUDIO_STATUS_PLAYING && state.progress_total_secs > 0 && !chapter_downloading;
 	smooth_timer_sync();
 
 	set_progress_label(state.progress_current_secs, current_total_length);
@@ -4245,8 +4237,9 @@ static void update_progress(void) {
 		static audio_status_t episode_last_status = AUDIO_STATUS_STOPPED;
 		bool episode_changed = state.status != episode_last_status;
 		episode_last_status = state.status;
-		podcaststate_note(state.current_file, state.progress_current_secs, state.progress_total_secs,
-						  episode_changed);
+		if (state.progress_heard_position) {
+			podcaststate_note(state.current_file, state.progress_current_secs, state.progress_total_secs, episode_changed);
+		}
 	}
 
 	// "Remember track". The decision, and the writing, live in device_state.c:
@@ -4467,8 +4460,17 @@ static void book_summary_action(void *user) {
 	audiobookextras_open_current_summary();
 }
 
-// The overflow button: the book's menu on a book, the episode queue on a
-// podcast, the track menu on anything else.
+static void podcast_chapters_action(void *user) {
+	(void)user;
+	chapters_open_podcast();
+}
+
+static void podcast_queue_action(void *user) {
+	(void)user;
+	trackmenu_open_queue();
+}
+
+// The overflow button shows the actions for the source that's playing.
 static void more_btn_event_cb(lv_event_t *e) {
 	if (audiobook_mode) {
 		static const popover_item_t BOOK_ITEMS[] = {
@@ -4480,10 +4482,19 @@ static void more_btn_event_cb(lv_event_t *e) {
 		popover_show(lv_event_get_current_target(e), BOOK_ITEMS, (int)(sizeof(BOOK_ITEMS) / sizeof(BOOK_ITEMS[0])));
 		return;
 	}
-	// A podcast has no chapters: it has episodes, and the episodes are already
-	// the queue. The button goes straight there.
 	if (podcast_mode) {
-		trackmenu_open_queue();
+		static const popover_item_t PODCAST_ITEMS[] = {
+			{"chapters", podcast_chapters_action, NULL},
+			{"trackmenu_queue", podcast_queue_action, NULL},
+		};
+		device_state_t state;
+		device_state_get(&state);
+		lv_obj_t *anchor = lv_event_get_current_target(e);
+		if (chapters_podcast_available(state.current_file)) {
+			popover_show(anchor, PODCAST_ITEMS, 2);
+		} else {
+			popover_show(anchor, &PODCAST_ITEMS[1], 1);
+		}
 		return;
 	}
 	trackmenu_open(lv_event_get_current_target(e));
@@ -5398,7 +5409,6 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_set_ext_click_area(more_btn, CORNER_BTN_EXT_CLICK);
 
 	lv_obj_t *more_icon = lv_image_create(more_btn);
-	more_btn_icon = more_icon;
 	lv_image_set_src(more_icon, &icon_ellipsis_vertical);
 	lv_obj_add_style(more_icon, &theme_style_icon, 0);
 	lv_obj_set_style_image_recolor(more_icon, lv_color_make(150, 150, 150), 0);

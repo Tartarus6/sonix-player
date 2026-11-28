@@ -1718,6 +1718,27 @@ static bool mp3_probe_cbr(decoder_t *dec, long start, long avail) {
 	return ix->cbr == 1;
 }
 
+// Read the headers up to an exact target without decoding all the PCM on
+// the way there. The background index can replace this short table later.
+static void mp3_index_to_frame(decoder_t *dec, long start, long avail, uint64_t frame) {
+	uint64_t delay = dec->impl.mp3->delayInPCMFrames;
+	drmp3_seek_point *pts = NULL;
+	drmp3_uint32 count = 0;
+	long scanned = 0;
+	if (mp3_index_scan(dec->file, start, avail, delay, mp3_spacing(dec->sample_rate, dec->total_pcm_frames), frame + delay, NULL, true, &pts, &count, &scanned)) {
+		mp3_index_install(dec, pts, count, scanned);
+		return;
+	}
+	// Even before the first useful point, zero must be past the tags.
+	pts = malloc(sizeof(*pts));
+	if (pts) {
+		pts[0] = mp3_start_point(start);
+		mp3_index_install(dec, pts, 1, start);
+	} else {
+		drmp3_bind_seek_table(dec->impl.mp3, 0, NULL);
+	}
+}
+
 // A track of a CUE sheet over an MP3, before its first seek.
 //
 // Its start has to land on the sample: mp3_quick_point() on a variable bitrate
@@ -1740,26 +1761,8 @@ static void mp3_cue_prepare(decoder_t *dec) {
 		return;
 	}
 	mp3_index_async(dec, start, avail);
-	if (dec->cue_begin == 0) {
-		return;
-	}
-
-	uint64_t delay = dec->impl.mp3->delayInPCMFrames;
-	drmp3_seek_point *pts = NULL;
-	drmp3_uint32 count = 0;
-	long scanned = 0;
-	if (mp3_index_scan(dec->file, start, avail, delay, mp3_spacing(dec->sample_rate, dec->total_pcm_frames),
-					   dec->cue_begin + delay, NULL, true, &pts, &count, &scanned)) {
-		mp3_index_install(dec, pts, count, scanned);
-		return;
-	}
-	// A track that starts before the first point the scan would note: the
-	// start of the audio alone, and dr_mp3 decodes forward from there -- a
-	// spacing at most, and exact.
-	pts = malloc(sizeof(*pts));
-	if (pts) {
-		pts[0] = mp3_start_point(start);
-		mp3_index_install(dec, pts, 1, start);
+	if (dec->cue_begin > 0) {
+		mp3_index_to_frame(dec, start, avail, dec->cue_begin);
 	}
 }
 
@@ -2741,9 +2744,10 @@ bool decoder_take_starved(decoder_t *dec) {
 	return growfile_take_starved(dec->growing);
 }
 
-int decoder_seek_to_frame(decoder_t *dec, uint64_t frame_index) {
-	if (!dec)
+static int seek_to_frame(decoder_t *dec, uint64_t frame_index, bool unclamped_mp3) {
+	if (!dec || (unclamped_mp3 && (dec->format != DECODE_FORMAT_MP3 || dec->cue_frames))) {
 		return 0;
+	}
 
 	// Inside a CUE track the caller counts from the start of the TRACK; the
 	// decoder counts from the start of the FILE.
@@ -2764,13 +2768,18 @@ int decoder_seek_to_frame(decoder_t *dec, uint64_t frame_index) {
 	//
 	// Callers should have clamped already (decoder_seekable_limit); this is the
 	// second turn of the key, for the ones that forget.
-	uint64_t limit = decoder_seekable_limit(dec);
-	if (limit > 0 && frame_index > limit) {
-		frame_index = limit;
+	if (!unclamped_mp3) {
+		uint64_t limit = decoder_seekable_limit(dec);
+		if (limit > 0 && frame_index > limit) {
+			frame_index = limit;
+		}
 	}
 
 	switch (dec->format) {
 	case DECODE_FORMAT_MP3: {
+		if (unclamped_mp3 && frame_index >= dec->impl.mp3->totalPCMFrameCount) {
+			return 0;
+		}
 		// The index, built on the first seek. Without it dr_mp3 decodes from
 		// where it is to where it was asked, stalling the audio thread for
 		// seconds; with it, at most MP3_INDEX_SECONDS are left to decode.
@@ -2787,11 +2796,33 @@ int decoder_seek_to_frame(decoder_t *dec, uint64_t frame_index) {
 		bool stale = ix->count > 0 && dec->growing && frame_index > ix->points[ix->count - 1].pcmFrameIndex &&
 					 mp3_available_bytes(dec) > ix->scanned_bytes;
 		long start = (long)dec->impl.mp3->streamStartOffset;
+		if (unclamped_mp3 && stale && !decoder_is_growing(dec)) {
+			// This decoder kept the partial index it built while downloading.
+			// Once complete, a CBR chapter past that index can jump directly
+			// instead of rereading the episode on the playback thread.
+			long complete_bytes = mp3_available_bytes(dec);
+			drmp3_seek_point point;
+			if (dec->impl.mp3->isCBR && mp3_probe_cbr(dec, start, complete_bytes) && mp3_quick_point(dec, frame_index, &point)) {
+				ix->quick[0] = mp3_start_point(start);
+				ix->quick[1] = point;
+				drmp3_bind_seek_table(dec->impl.mp3, 2, ix->quick);
+				bool reached = drmp3_seek_to_pcm_frame(dec->impl.mp3, frame_index);
+				drmp3_bind_seek_table(dec->impl.mp3, ix->count, ix->points);
+				if (reached) {
+					return 1;
+				}
+			}
+		}
 		long avail = ix->count == 0 && !dec->growing ? mp3_available_bytes(dec) : 0;
 		if (ix->count == 0 && avail - start > MP3_ASYNC_BYTES) {
 			// A long file: see mp3_index_async(). The index when the thread has
 			// finished it, otherwise a point worked out on the spot.
 			if (!mp3_index_take(dec)) {
+				if (unclamped_mp3 && frame_index > 0 && (!dec->impl.mp3->isCBR || !mp3_probe_cbr(dec, start, avail))) {
+					mp3_index_async(dec, start, avail);
+					mp3_index_to_frame(dec, start, avail, frame_index);
+					return (int)drmp3_seek_to_pcm_frame(dec->impl.mp3, frame_index);
+				}
 				drmp3_seek_point p;
 				bool quick = frame_index > 0 && mp3_quick_point(dec, frame_index, &p);
 				if (ix->cbr == 0 && !ix->failed) {
@@ -2928,6 +2959,10 @@ int decoder_seek_to_frame(decoder_t *dec, uint64_t frame_index) {
 		return 0;
 	}
 }
+
+int decoder_seek_to_frame(decoder_t *dec, uint64_t frame_index) { return seek_to_frame(dec, frame_index, false); }
+
+int decoder_seek_mp3_unclamped(decoder_t *dec, uint64_t frame_index) { return seek_to_frame(dec, frame_index, true); }
 
 void decoder_close(decoder_t *dec) {
 	if (!dec)

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "lvgl/lvgl.h"
 
@@ -12,9 +13,10 @@
 #include "src/gui/shell/settingsrow.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
+#include "src/system/core/lang.h"
+#include "src/system/library/id3chap.h"
 #include "src/system/playback/audiobook.h"
 #include "src/system/playback/device_state.h"
-#include "src/system/core/lang.h"
 
 lv_obj_t *chapters_screen;
 
@@ -28,6 +30,11 @@ lv_obj_t *chapters_screen;
 static lv_obj_t *chapter_list;
 static lv_obj_t *empty_label;
 static int listed_count;
+static int highlighted_row;
+static bool listing_podcast;
+static char podcast_file[512];
+static id3chap_t *podcast_marks;
+static int podcast_count;
 
 // A folder book lists its files here instead: each file is a chapter.
 static bool listing_parts;
@@ -48,22 +55,83 @@ static void format_clock(double seconds, char *out, size_t out_size) {
 	}
 }
 
+static int compare_chapter_starts(const void *a, const void *b) {
+	double first = ((const id3chap_t *)a)->start;
+	double second = ((const id3chap_t *)b)->start;
+	return (first > second) - (first < second);
+}
+
+// Only read the tag when the podcast menu opens. An unfinished tag is
+// retried the next time, and the visible list keeps its original marks.
+bool chapters_podcast_available(const char *path) {
+	if (!path || !path[0]) {
+		return false;
+	}
+	if (listing_podcast && lv_screen_active() == chapters_screen) {
+		return podcast_count > 0 && strcmp(path, podcast_file) == 0;
+	}
+	// The same path can hold a fresh download the next time the menu opens.
+	free(podcast_marks);
+	podcast_marks = NULL;
+	podcast_count = 0;
+	const char *ext = strrchr(path, '.');
+	if (!ext || strcasecmp(ext, ".mp3") != 0 || id3chap_tag_pending(path)) {
+		return false;
+	}
+
+	// Read once, keeping only as many chapter rows as the list can show.
+	id3chap_t *marks = calloc(MAX_ROWS, sizeof(*marks));
+	if (!marks) {
+		return false;
+	}
+	int count = id3chap_read(path, marks, MAX_ROWS);
+	if (count <= 0) {
+		free(marks);
+		return false;
+	}
+	podcast_count = count < MAX_ROWS ? count : MAX_ROWS;
+	qsort(marks, (size_t)podcast_count, sizeof(*marks), compare_chapter_starts);
+	podcast_marks = marks;
+	snprintf(podcast_file, sizeof(podcast_file), "%s", path);
+	return true;
+}
+
+static int podcast_chapter_at(const char *path, double seconds) {
+	if (strcmp(path, podcast_file) == 0) {
+		for (int i = podcast_count - 1; i >= 0; i--) {
+			if (podcast_marks[i].start <= seconds + 0.001) {
+				return i;
+			}
+		}
+	}
+	return -1;
+}
+
 static void chapter_clicked_cb(lv_event_t *e) {
 	if (player_sheet_drag_active() || switcher_back_drag_active()) {
 		return;
 	}
 
 	int index = (int)(intptr_t)lv_event_get_user_data(e);
-	double start = 0;
-	if (!audiobook_chapter(index, NULL, 0, &start)) {
+	if (listing_podcast) {
+		device_state_t state;
+		device_state_get(&state);
+		if (strcmp(state.current_file, podcast_file) != 0 || index < 0 || index >= podcast_count) {
+			return;
+		}
+		device_state_seek_to_chapter(podcast_marks[index].start);
+		// Same episode. A full refresh would reset the clocks while the seek waits.
+		back_btn_cb(NULL);
 		return;
+	} else {
+		double start = 0;
+		if (!audiobook_chapter(index, NULL, 0, &start)) {
+			return;
+		}
+		device_state_seek(start);
+		// A book remembers the chosen position even if the player is switched off immediately.
+		audiobook_note_position(start, 0, true);
 	}
-
-	device_state_seek(start);
-	// The position is written straight away rather than at the next ten-second
-	// tick: jumping to a chapter and then switching the player off immediately
-	// is normal with a book.
-	audiobook_note_position(start, 0, true);
 
 	player_refresh_now_playing();
 	back_btn_cb(NULL); // back to the player, which is where the jump is heard
@@ -105,6 +173,17 @@ static void part_clicked_cb(lv_event_t *e) {
 	back_btn_cb(NULL);
 }
 
+static void highlight(lv_obj_t *row, bool playing) {
+	for (uint32_t i = 0; i < lv_obj_get_child_count(row); i++) {
+		lv_obj_t *label = lv_obj_get_child(row, (int32_t)i);
+		if (playing) {
+			lv_obj_set_style_text_color(label, theme()->accent, 0);
+		} else {
+			lv_obj_remove_local_style_prop(label, LV_STYLE_TEXT_COLOR, LV_PART_MAIN);
+		}
+	}
+}
+
 static lv_obj_t *make_row(int i, const char *title, const char *clock, bool playing, lv_event_cb_t cb) {
 	lv_obj_t *row = lv_btn_create(chapter_list);
 	lv_obj_set_size(row, lv_pct(100), ROW_HEIGHT);
@@ -137,9 +216,8 @@ static lv_obj_t *make_row(int i, const char *title, const char *clock, bool play
 	lv_obj_add_style(label, &theme_style_text, 0);
 	lv_obj_set_style_text_font(label, &font_ui_24, 0);
 
-	lv_obj_t *time_label = NULL;
 	if (clock) {
-		time_label = lv_label_create(row);
+		lv_obj_t *time_label = lv_label_create(row);
 		lv_label_set_text(time_label, clock);
 		lv_obj_add_style(time_label, &theme_style_text_dim, 0);
 		lv_obj_set_style_text_font(time_label, &font_ui_18, 0);
@@ -148,11 +226,7 @@ static lv_obj_t *make_row(int i, const char *title, const char *clock, bool play
 	// The chapter being listened to is marked the way the queue marks the
 	// playing track: the accent on the words, not a second widget.
 	if (playing) {
-		lv_obj_set_style_text_color(number, theme()->accent, 0);
-		lv_obj_set_style_text_color(label, theme()->accent, 0);
-		if (time_label) {
-			lv_obj_set_style_text_color(time_label, theme()->accent, 0);
-		}
+		highlight(row, true);
 	}
 	return row;
 }
@@ -164,14 +238,35 @@ static int playing_row(void) {
 	}
 	device_state_t state;
 	device_state_get(&state);
-	return audiobook_chapter_at(state.progress_current_secs);
+	if (!listing_podcast) {
+		return audiobook_chapter_at(state.progress_current_secs);
+	}
+	return podcast_chapter_at(state.current_file, state.progress_current_secs);
+}
+
+static void refresh_podcast_highlight(lv_timer_t *timer) {
+	(void)timer;
+	if (!listing_podcast || lv_screen_active() != chapters_screen) {
+		return;
+	}
+	int playing = playing_row();
+	if (playing == highlighted_row) {
+		return;
+	}
+	if (highlighted_row >= 0 && highlighted_row < listed_count) {
+		highlight(lv_obj_get_child(chapter_list, highlighted_row), false);
+	}
+	if (playing >= 0 && playing < listed_count) {
+		highlight(lv_obj_get_child(chapter_list, playing), true);
+	}
+	highlighted_row = playing;
 }
 
 static void rebuild(void) {
 	lv_obj_clean(chapter_list);
 	empty_label = NULL;
 
-	listing_parts = audiobook_part_count() > 1;
+	listing_parts = !listing_podcast && audiobook_part_count() > 1;
 	if (listing_parts) {
 		int count = audiobook_part_count();
 		if (count > MAX_ROWS) {
@@ -189,7 +284,7 @@ static void rebuild(void) {
 		return;
 	}
 
-	int count = audiobook_chapter_count();
+	int count = listing_podcast ? podcast_count : audiobook_chapter_count();
 	if (count > MAX_ROWS) {
 		count = MAX_ROWS;
 	}
@@ -206,20 +301,20 @@ static void rebuild(void) {
 		return;
 	}
 
-	device_state_t state;
-	device_state_get(&state);
-	int playing = audiobook_chapter_at(state.progress_current_secs);
-
+	highlighted_row = playing_row();
 	for (int i = 0; i < count; i++) {
 		char title[192] = "";
 		double start = 0;
-		if (!audiobook_chapter(i, title, sizeof(title), &start)) {
+		if (listing_podcast) {
+			snprintf(title, sizeof(title), "%s", podcast_marks[i].title);
+			start = podcast_marks[i].start;
+		} else if (!audiobook_chapter(i, title, sizeof(title), &start)) {
 			break;
 		}
 
 		char clock[24];
 		format_clock(start, clock, sizeof(clock));
-		make_row(i, title, clock, i == playing, chapter_clicked_cb);
+		make_row(i, title, clock, i == highlighted_row, chapter_clicked_cb);
 	}
 }
 
@@ -238,10 +333,24 @@ static void loaded_cb(lv_event_t *e) {
 	}
 }
 
-void chapters_open(void) {
+static void open_list(void) {
 	player_sheet_close(false);
 	switch_screen(chapters_screen);
 	switcher_set_player_return(chapters_screen);
+}
+
+void chapters_open(void) {
+	listing_podcast = false;
+	open_list();
+}
+
+void chapters_open_podcast(void) {
+	device_state_t state;
+	device_state_get(&state);
+	if (podcast_count > 0 && strcmp(state.current_file, podcast_file) == 0) {
+		listing_podcast = true;
+		open_list();
+	}
 }
 
 void chapters_init(gui_config_t *cfg) {
@@ -269,4 +378,5 @@ void chapters_init(gui_config_t *cfg) {
 	// the sheet over the list being read. The swipe-back still works.
 	switcher_attach_back_gesture(chapter_list);
 	lv_obj_add_event_cb(chapters_screen, loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
+	lv_timer_create(refresh_podcast_highlight, 500, NULL);
 }

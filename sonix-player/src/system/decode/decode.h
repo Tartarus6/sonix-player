@@ -141,6 +141,9 @@ bool decoder_dsd_to_pcm(decoder_t *dec);
 
 // Seek decoder to the specified frame index. Returns nonzero on success, 0 on failure.
 int decoder_seek_to_frame(decoder_t *dec, uint64_t frame_index);
+// MP3 only. The caller waits for the stream before trying; never clamp to a
+// byte-based duration estimate and report that as the requested position.
+int decoder_seek_mp3_unclamped(decoder_t *dec, uint64_t frame_index);
 
 // The furthest frame that can be seeked to right now. For a normal file that is
 // the end; for one still downloading it is how far it has got, minus a margin
