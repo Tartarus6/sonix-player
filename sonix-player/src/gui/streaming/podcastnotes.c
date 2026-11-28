@@ -185,7 +185,7 @@ void podcastnotes_init(gui_config_t *cfg) {
 	lv_obj_set_width(label, lv_pct(100));
 	lv_obj_add_style(label, &theme_style_text, 0);
 	lv_obj_set_style_text_font(label, &font_ui_22, 0);
-	lv_obj_set_style_text_line_space(label, 4, 0);
+	lv_obj_set_style_text_line_space(label, 8, 0);
 	lv_label_set_recolor(label, false);
 	lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
 	lv_label_set_text_static(label, "");

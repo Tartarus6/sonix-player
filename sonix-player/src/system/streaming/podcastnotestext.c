@@ -162,9 +162,10 @@ podcast_notes_result_t podcast_notes_to_text(const char *html, char **text) {
 				break;
 			}
 		}
+		bool heading = token.name_len == 2 && (token.name[0] == 'h' || token.name[0] == 'H') && token.name[1] >= '1' && token.name[1] <= '6';
 		if (epub_xml_is(&token, "br") && open) {
 			line_break(&out, out.breaks == 0 ? 1 : 2);
-		} else if (epub_xml_is(&token, "p") || epub_xml_is(&token, "blockquote") || epub_xml_is(&token, "hr")) {
+		} else if (heading || epub_xml_is(&token, "p") || epub_xml_is(&token, "blockquote") || epub_xml_is(&token, "hr")) {
 			line_break(&out, 2);
 		} else if (epub_xml_is(&token, "li")) {
 			line_break(&out, 1);
@@ -172,7 +173,7 @@ podcast_notes_result_t podcast_notes_to_text(const char *html, char **text) {
 				append(&out, "•", sizeof("•") - 1);
 				out.space = true;
 			}
-		} else if (epub_xml_is(&token, "div") || epub_xml_is(&token, "ul") || epub_xml_is(&token, "ol") || (token.name_len == 2 && (token.name[0] == 'h' || token.name[0] == 'H') && token.name[1] >= '1' && token.name[1] <= '6')) {
+		} else if (epub_xml_is(&token, "div") || epub_xml_is(&token, "ul") || epub_xml_is(&token, "ol")) {
 			line_break(&out, 1);
 		}
 	}

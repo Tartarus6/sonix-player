@@ -97,6 +97,10 @@ int main(void) {
 	response = "<rss><channel><item><guid>second &amp; latest</guid>"
 			   "<enclosure url='https://example.test/second.mp3'/><description>Why 1 &lt;3 matters</description></item></channel></rss>";
 	expect_note(feed.id, second, "Why 1 <3 matters");
+	response = "<rss><channel><item><guid>second &amp; latest</guid><description><![CDATA["
+			   "<h4>Links and Show Notes:</h4><h5><a href='https://example.test/first'>First link</a></h5> "
+			   "<h5><a href='https://example.test/second'>Second link</a></h5>]]></description></item></channel></rss>";
+	expect_note(feed.id, second, "Links and Show Notes:\n\nFirst link\n\nSecond link");
 	response = NULL;
 	fixture = NULL;
 	assert(podcastrss_episode_notes(feed.id, second, &text) == PODCAST_NOTES_ERROR && !text);
