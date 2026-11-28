@@ -4096,6 +4096,7 @@ int audio_init(void) {
 
 	set_volume_percent(40); // a sane, audible default on the new dB taper
 	auto_set_output();
+	volume_safety_enforce_active();
 
 	pthread_mutex_lock(&audio_mutex);
 	stop_thread = false;
@@ -4117,6 +4118,7 @@ int audio_init(void) {
 
 int audio_play(const char *filepath) {
 	fprintf(stderr, "audio[%ld]: play requested '%s'\n", log_ms(), filepath);
+	volume_safety_enforce_active();
 
 	// NO route write here: this runs on the UI thread while the previous
 	// track's PCM may still be open, and poking "Output Port Switch" with a
@@ -4163,6 +4165,7 @@ int audio_play(const char *filepath) {
 // second out of the speakers before the seek reached it.
 int audio_play_at(const char *filepath, double start_secs) {
 	fprintf(stderr, "audio[%ld]: play requested '%s' from %.1f s\n", log_ms(), filepath, start_secs);
+	volume_safety_enforce_active();
 
 	pthread_mutex_lock(&audio_mutex);
 	restart_fresh_pending = false; // an explicit play beats the armed restart
@@ -4188,6 +4191,7 @@ int audio_play_at(const char *filepath, double start_secs) {
 
 int audio_play_paused(const char *filepath, double start_secs) {
 	fprintf(stderr, "audio[%ld]: restore requested '%s' at %.1f s (paused)\n", log_ms(), filepath, start_secs);
+	volume_safety_enforce_active();
 
 	pthread_mutex_lock(&audio_mutex);
 	restart_fresh_pending = false; // an explicit play beats the armed restart
@@ -4353,6 +4357,10 @@ void audio_pause(void) {
 }
 
 void audio_resume(void) {
+	// The ordinary pause/resume toggle is a playback start too, so the same
+	// safety clamp as audio_play() applies before sound is allowed to resume.
+	volume_safety_enforce_active();
+
 	// The fresh restart, when the freeze armed one: the track context no longer
 	// exists (killed before mem, deliberately), so "resume" here means
 	// rebuilding everything from scratch at the right point -- fresh decoder,

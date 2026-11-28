@@ -89,7 +89,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 - **The same volume curve** as the stock player.
 - **Remember volume** - one level for each output: 3.5 mm, 4.4 mm, USB-C and Bluetooth.
-- **Volume limit** - a maximum volume for each output.
+- **Volume limit** - a maximum volume for each output. Playback starts and resumes below it unless you have explicitly allowed a higher level, and raising the volume past it asks for confirmation before allowing it.
 - **Volume steps** - how much one press of the volume key changes the volume.
 - **Line out** - the jack goes to a fixed level for an amplifier, and your volume comes back when you turn it off.
 - **USB DAC** - connect the player to a computer and it becomes its sound card, from 32 kHz to 384 kHz. You can choose whether it charges at the same time.

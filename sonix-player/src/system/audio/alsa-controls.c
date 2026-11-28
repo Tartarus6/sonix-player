@@ -863,6 +863,9 @@ static bool output_in_range(volume_output_t out) { return out >= 0 && out < VOLU
 static bool limit_loaded;
 static bool limit_on;
 static int limit_level[VOLUME_OUTPUT_COUNT] = {100, 100, 100, 100};
+// Temporary, in-memory overrides granted after explicit user confirmation.
+// Never persisted: a restart or output/limit change falls back to the limit.
+static bool limit_override[VOLUME_OUTPUT_COUNT];
 
 static const char *const LIMIT_KEYS[VOLUME_OUTPUT_COUNT] = {
 	[VOLUME_OUTPUT_PHONES] = "volume_limit_phones",
@@ -889,14 +892,35 @@ static void limit_load(void) {
 	}
 }
 
-// The ceiling in force for `out` right now: 100 with the limit off and for the
-// outputs it does not cover.
-static int limit_ceiling(volume_output_t out) {
+static int limit_configured_ceiling(volume_output_t out) {
 	limit_load();
 	if (!limit_on || !output_in_range(out) || !LIMIT_KEYS[out]) {
 		return 100;
 	}
 	return limit_level[out];
+}
+
+int volume_limit_configured_ceiling(volume_output_t out) { return limit_configured_ceiling(out); }
+
+void volume_limit_set_override_above(volume_output_t out, bool allow) {
+	if (!output_in_range(out)) {
+		return;
+	}
+	limit_override[out] = allow;
+}
+
+bool volume_limit_override_active(volume_output_t out) {
+	return output_in_range(out) && limit_override[out];
+}
+
+// The ceiling in force for `out` right now: the configured limit, unless the
+// user explicitly confirmed going above it for this output (session override).
+static int limit_ceiling(volume_output_t out) {
+	int ceiling = limit_configured_ceiling(out);
+	if (limit_on && ceiling < 100 && limit_override[out]) {
+		return 100;
+	}
+	return ceiling;
 }
 
 bool volume_limit_enabled(void) {
@@ -941,6 +965,9 @@ void volume_limit_set_enabled(bool on) {
 	limit_on = on;
 	config_set_int("audio", "volume_limit", on ? 1 : 0);
 	config_save();
+	for (int i = 0; i < VOLUME_OUTPUT_COUNT; i++) {
+		limit_override[i] = false;
+	}
 	if (on) {
 		limit_enforce(VOLUME_OUTPUT_PHONES);
 		limit_enforce(VOLUME_OUTPUT_BALANCED);
@@ -955,8 +982,53 @@ void volume_limit_set(volume_output_t out, int percent) {
 		return;
 	}
 	limit_level[out] = limit_clamp_value(percent);
+	// A changed limit revokes any prior "allow above limit" confirmation.
+	limit_override[out] = false;
 	config_set_int("audio", LIMIT_KEYS[out], limit_level[out]);
 	limit_enforce(out);
+}
+
+// Safety net: if the volume ever ends up above the configured limit (a stale
+// restore, a firmware/hardware quirk, or any path that bypassed the confirmation
+// gate), pull it down before audio is allowed to play. A raise the user already
+// confirmed is not an unexpected jump: the permission lasts until the output,
+// the limit or the reboot changes, so a track start must not silently revoke it
+// while leaving the gate open for the next volume press.
+int volume_safety_enforce_active(void) {
+	limit_load();
+	int ceiling = limit_configured_ceiling(profile_out);
+
+	if (volume_limit_override_active(profile_out)) {
+		return current_percent;
+	}
+
+	// Keep the remembered level for this output within bounds too, so a later
+	// profile switch cannot resurrect an unsafe value.
+	if (output_in_range(profile_out) && level[profile_out] > ceiling) {
+		level[profile_out] = ceiling;
+		profile_dirty = true;
+	}
+
+	// With line out on, current_percent is the fixed hardware index (100), not
+	// the user's level, and set_volume_percent() already refuses to move it.
+	// Clamping that index here would desync it from the DAC attenuation and
+	// overwrite the remembered level with a number nobody chose. Bring down
+	// the level to return to instead, and leave the hardware index alone.
+	if (lineout_on) {
+		if (lineout_saved_percent > ceiling) {
+			lineout_saved_percent = ceiling;
+		}
+		volume_profile_persist();
+		return current_percent;
+	}
+
+	if (current_percent > ceiling) {
+		fprintf(stderr, "volume: safety clamp %d%% -> %d%% (limit)\n", current_percent, ceiling);
+		profile_dirty = true;
+		apply_volume_hw(ceiling);
+		volume_profile_persist();
+	}
+	return current_percent;
 }
 
 void volume_profile_set_level(volume_output_t out, int percent) {
@@ -964,8 +1036,9 @@ void volume_profile_set_level(volume_output_t out, int percent) {
 		return;
 	}
 	level[out] = (percent >= 0 && percent <= 100) ? percent : -1;
-	if (level[out] > limit_ceiling(out)) {
-		level[out] = limit_ceiling(out);
+	int ceiling = limit_configured_ceiling(out);
+	if (level[out] > ceiling) {
+		level[out] = ceiling;
 	}
 }
 
@@ -1029,6 +1102,9 @@ void volume_profile_set_output(volume_output_t out) {
 	level[profile_out] = current_percent; // the level the outgoing profile is at
 	volume_output_t leaving = profile_out;
 	profile_out = out;
+	// Changing output drops any "allow above limit" confirmation for the new
+	// output so it cannot be carried across accidentally.
+	limit_override[out] = false;
 	profile_dirty = true;
 
 	int wanted = level[out];

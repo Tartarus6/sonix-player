@@ -19,6 +19,7 @@
 #include "src/gui/bluetooth/btaudio.h"
 #include "src/gui/bluetooth/btsettings.h"
 #include "src/gui/shell/confirm.h"
+#include "src/system/audio/alsa-controls.h"
 #include "src/gui/shell/corners.h"
 #include "src/gui/settings/bootlogopage.h"
 #include "src/gui/settings/kblayoutpage.h"
@@ -568,6 +569,82 @@ static void volume_async_cb(void *user_data) {
 // From the AVRCP reader thread and from btvolume when the headphones move the
 // level themselves, so across the bridge like the key above.
 void gui_notify_volume(int percent) { gui_post(volume_async_cb, (void *)(intptr_t)percent); }
+
+// The question belongs to the output that was active when the key was pressed,
+// and to the limit that was configured when it was asked. The routing watcher
+// can change the output and settings can change the ceiling while the dialog is
+// open, and confirm.c holds only one pending callback, so carry all of that with
+// the target instead of looking it up again when OK is pressed.
+typedef struct {
+	volume_output_t out;
+	int target;
+	bool limit_on;
+	int ceiling;
+} above_limit_confirm_t;
+
+static above_limit_confirm_t key_above_limit_confirm;
+
+static void allow_above_limit_ok_cb(void *user) {
+	const above_limit_confirm_t *ctx = user;
+	// A permission for the prompted output is not one for whichever output is
+	// active now, and line out's fixed level cannot be raised at all.
+	if (volume_profile_output() != ctx->out || lineout_is_active()) {
+		return;
+	}
+	// A limit change revokes the override and brings the level down. A prompt
+	// asked under the old ceiling is not consent to the new one, even when OK
+	// is deferred by confirm.c to a later GUI tick.
+	bool limit_on = volume_limit_enabled();
+	int ceiling = volume_limit_configured_ceiling(ctx->out);
+	if (limit_on != ctx->limit_on || ceiling != ctx->ceiling) {
+		return;
+	}
+	if (limit_on && ceiling < 100 && ctx->target > ceiling) {
+		volume_limit_set_override_above(ctx->out, true);
+	}
+	set_volume_percent(ctx->target);
+	gui_notify_volume(get_volume_percent());
+}
+
+// gui_post carries one void * by value. Pack the two small integers into it as
+// gui_notify_key() does: a pointer to shared storage could be overwritten by
+// the next request from the reader thread before this callback runs.
+#define ABOVE_LIMIT_TARGET_MASK 0xFFu
+
+static void volume_above_limit_async_cb(void *user_data) {
+	uintptr_t packed = (uintptr_t)user_data;
+	volume_output_t out = (volume_output_t)(packed >> 8);
+	int target = (int)(packed & ABOVE_LIMIT_TARGET_MASK);
+	// With line out on the level is a fixed index that set_volume_percent()
+	// refuses to move: a prompt would grant a permission for a no-op, and the
+	// override would still be live after line out is switched off. The watcher
+	// runs on its own timer, so the output may also have changed since the key.
+	if (out != volume_profile_output() || lineout_is_active()) {
+		return;
+	}
+	bool limit_on = volume_limit_enabled();
+	int cfg_ceiling = volume_limit_configured_ceiling(out);
+	if (!(limit_on && cfg_ceiling < 100 && target > cfg_ceiling)) {
+		return;
+	}
+	// Keep the user at the safe level and ask explicitly before going above it.
+	set_volume_percent(cfg_ceiling);
+	volume_overlay_show(get_volume_percent());
+	topbar_refresh_volume(get_volume_percent());
+	key_above_limit_confirm.out = out;
+	key_above_limit_confirm.target = target;
+	key_above_limit_confirm.limit_on = limit_on;
+	key_above_limit_confirm.ceiling = cfg_ceiling;
+	confirm_show("volume_limit_confirm_title", "volume_limit_confirm_note", "allow", allow_above_limit_ok_cb,
+				 &key_above_limit_confirm);
+}
+
+void gui_request_volume_above_limit(volume_output_t out, int target_percent) {
+	if (target_percent < 0) target_percent = 0;
+	if (target_percent > 100) target_percent = 100; // fits the packed byte
+	uintptr_t packed = ((uintptr_t)(unsigned)out << 8) | (uintptr_t)(unsigned)target_percent;
+	gui_post(volume_above_limit_async_cb, (void *)packed);
+}
 
 static void power_menu_async_cb(void *unused) {
 	(void)unused;
