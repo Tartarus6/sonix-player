@@ -1,9 +1,12 @@
 #include "src/system/library/id3chap.h"
 
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 // See id3chap.h. The shape of what is read:
 //
@@ -204,3 +207,38 @@ static int read_chapters(const char *path, id3chap_t *out, int max, int limit) {
 int id3chap_read(const char *path, id3chap_t *out, int max) { return read_chapters(path, out, max, MAX_CHAPTERS); }
 
 bool id3chap_present(const char *path) { return read_chapters(path, NULL, 0, 1) > 0; }
+
+// Unlike the legacy chapter reader, the cache must not wait on a malformed header.
+static bool valid_pending_header(const uint8_t *header) {
+	uint8_t version = header[3];
+	if (memcmp(header, "ID3", 3) != 0 || (version != 3 && version != 4) || header[4] == 0xFF) {
+		return false;
+	}
+	uint8_t reserved_flags = version == 3 ? 0x1F : 0x0F;
+	uint8_t size_bits = header[6] | header[7] | header[8] | header[9];
+	return !(header[5] & reserved_flags) && !(size_bits & 0x80);
+}
+
+bool id3chap_tag_pending(const char *path) {
+	if (!path || !path[0]) {
+		return false;
+	}
+	int fd = open(path, O_RDONLY | O_NONBLOCK);
+	if (fd < 0) {
+		return false;
+	}
+
+	uint8_t header[10];
+	struct stat st;
+	bool pending = false;
+	if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+		if (st.st_size < (off_t)sizeof(header)) {
+			pending = true;
+		} else if (read(fd, header, sizeof(header)) == sizeof(header) && valid_pending_header(header)) {
+			uint32_t tag_size = syncsafe32(header + 6);
+			pending = tag_size <= MAX_TAG && (off_t)tag_size > st.st_size - (off_t)sizeof(header);
+		}
+	}
+	close(fd);
+	return pending;
+}

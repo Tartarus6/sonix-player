@@ -34,4 +34,10 @@ int id3chap_read(const char *path, id3chap_t *out, int max);
 // True when the file has at least one chapter. Stops parsing at the first.
 bool id3chap_present(const char *path);
 
+// For a growing cache file: true when it has fewer than 10 bytes, or when
+// a supported ID3v2.3/v2.4 header declares an in-budget payload past EOF.
+// False for missing files, non-ID3 data, invalid headers and complete tags.
+// This tests file length, not audio completeness or unwritten sparse regions.
+bool id3chap_tag_pending(const char *path);
+
 #endif /* ID3CHAP_H */
