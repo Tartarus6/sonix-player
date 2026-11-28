@@ -5,6 +5,26 @@
 
 #include "lvgl/lvgl.h"
 
+// Semantic icon roles used by the ported streaming services. The HiBy themes
+// are monochrome: every role resolves to the ordinary accent colour (MUTED to
+// the secondary text colour), so the existing look is unchanged. A theme can
+// assign distinct role colours later without any caller being rewritten.
+typedef enum {
+	THEME_SEMANTIC_BLUE,
+	THEME_SEMANTIC_CYAN,
+	THEME_SEMANTIC_PURPLE,
+	THEME_SEMANTIC_GREEN,
+	THEME_SEMANTIC_AMBER,
+	THEME_SEMANTIC_RED,
+	THEME_SEMANTIC_MUTED,
+} theme_semantic_t;
+
+lv_color_t theme_semantic_color(theme_semantic_t role);
+
+// The unified themes use the same monochrome glyph in every role, so the
+// function-coloured icon mode of the V1 port is always off here.
+bool theme_uses_function_glyphs(void);
+
 // The handful of colours the whole UI is built from. Two presets (dark and
 // light) live in theme.c; everything on screen pulls from the active one.
 typedef struct {

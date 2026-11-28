@@ -170,6 +170,28 @@ typedef struct {
 // fails, or the status is not 200.
 bool http_stream_open(http_stream_t *st, const char *url, int timeout_secs);
 
+// The ported Jellyfin cache needs to send an auth header on a stream and to
+// observe the socket while it is being opened, so cancellation can shut it
+// down. This is a narrow, backward-compatible extension of http_stream_open():
+// with no options it behaves exactly as before. TLS verification stays strict,
+// extra headers are sent only on the first hop, never on a redirect. With
+// no_https_downgrade set, an absolute redirect from https:// to http:// is
+// refused.
+typedef bool (*http_socket_cb)(void *user, int fd);
+
+typedef struct {
+	http_socket_cb socket_cb;
+	void *socket_user;
+	bool no_icy;
+	bool no_https_downgrade;
+	const char *user_agent;
+	const char *extra_headers;
+	int *status_out;
+} http_stream_options_t;
+
+bool http_stream_open_ex(http_stream_t *st, const char *url, int timeout_secs,
+						 const http_stream_options_t *options);
+
 // Reads up to `len` bytes of *audio* into buf: any ICY metadata blocks in the
 // way are consumed and parsed out, never handed to the caller. Returns the
 // number of bytes read, 0 at end of stream, -1 on error.

@@ -2,6 +2,7 @@
 #define SETTINGSROW_H
 
 #include "src/gui/shell/gui.h"
+#include "src/gui/shell/theme.h"
 
 #include "lvgl/lvgl.h"
 
@@ -36,6 +37,16 @@ lv_obj_t *settingsrow_page_title(lv_obj_t *screen);
 // NULL for a row that just opens something.
 lv_obj_t *settingsrow_add(lv_obj_t *parent, const char *name, lv_obj_t **value_out, lv_event_cb_t cb,
 						  void *user_data);
+
+// Compatibility helpers used by the ported V1 streaming pages. They keep the
+// same row shape as every other page: an optional leading glyph, an optional
+// second line of dim text, and corner buttons placed with the shared geometry.
+void settingsrow_add_icon(lv_obj_t *row, const lv_image_dsc_t *source, theme_semantic_t tone);
+void settingsrow_add_accent_icon(lv_obj_t *row, const lv_image_dsc_t *source);
+void settingsrow_add_caption(lv_obj_t *row, const char *text);
+void settingsrow_place_corner_button(lv_obj_t *button, gui_config_t *cfg, int slot);
+void settingsrow_scale_corner_icon(lv_obj_t *icon, gui_config_t *cfg);
+void settingsrow_title_realign(lv_obj_t *title);
 
 // The row's own name label, for the one row whose text is not a fixed tag: the
 // AirPods row, which says which model is connected. Everything else sets its

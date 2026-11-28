@@ -352,3 +352,109 @@ void gridpage_show_empty(lv_obj_t *grid, lv_obj_t *panel, bool empty) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Compatibility helpers for the ported V1 streaming pages
+// ---------------------------------------------------------------------------
+
+static lv_obj_t *grid_tile_at(lv_obj_t *grid, int index) {
+	if (!grid || index < 0 || index >= (int)lv_obj_get_child_count(grid)) {
+		return NULL;
+	}
+	return lv_obj_get_child(grid, index);
+}
+
+void gridpage_set_tile_icon_size(lv_obj_t *grid, int index, int icon_size) {
+	lv_obj_t *tile = grid_tile_at(grid, index);
+	if (!tile || icon_size <= 0) {
+		return;
+	}
+	lv_obj_t *icon = lv_obj_get_child(tile, TILE_ICON_CHILD);
+	if (!icon) {
+		return;
+	}
+	const lv_image_dsc_t *src = (const lv_image_dsc_t *)lv_image_get_src(icon);
+	if (!src || !src->header.w || !src->header.h) {
+		return;
+	}
+	int max_side = LV_MAX((int)src->header.w, (int)src->header.h);
+	int w = LV_MAX(1, (int)src->header.w * icon_size / max_side);
+	int h = LV_MAX(1, (int)src->header.h * icon_size / max_side);
+	lv_obj_set_size(icon, w, h);
+	lv_image_set_inner_align(icon, LV_IMAGE_ALIGN_CENTER);
+	lv_image_set_scale(icon, (uint32_t)(LV_SCALE_NONE * icon_size / max_side));
+}
+
+void gridpage_set_tile_icon_style(lv_obj_t *grid, int index, const lv_image_dsc_t *icon_src, int icon_size,
+								  bool recolor, lv_color_t color, bool glow) {
+	lv_obj_t *tile = grid_tile_at(grid, index);
+	if (!tile || !icon_src) {
+		return;
+	}
+	lv_obj_t *icon = lv_obj_get_child(tile, TILE_ICON_CHILD);
+	if (!icon) {
+		return;
+	}
+	lv_image_set_src(icon, icon_src);
+	if (icon_size > 0) {
+		gridpage_set_tile_icon_size(grid, index, icon_size);
+	}
+	if (recolor) {
+		lv_obj_set_style_image_recolor(icon, color, 0);
+		lv_obj_set_style_image_recolor_opa(icon, LV_OPA_COVER, 0);
+	} else {
+		lv_obj_set_style_image_recolor_opa(icon, LV_OPA_TRANSP, 0);
+	}
+	// No halo in the three-device themes: a static echo behind a glyph would
+	// read as a shadow with no light source.
+	(void)glow;
+}
+
+void gridpage_set_tile_orientation(lv_obj_t *grid, int index, bool horizontal) {
+	lv_obj_t *tile = grid_tile_at(grid, index);
+	if (!tile) {
+		return;
+	}
+	if (horizontal) {
+		lv_obj_set_flex_flow(tile, LV_FLEX_FLOW_ROW);
+		lv_obj_set_flex_align(tile, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+		lv_obj_set_style_pad_gap(tile, 8, 0);
+		lv_obj_t *label = lv_obj_get_child(tile, TILE_LABEL_CHILD);
+		if (label) {
+			lv_obj_set_width(label, lv_pct(70));
+			lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_LEFT, 0);
+		}
+	} else {
+		lv_obj_set_flex_flow(tile, LV_FLEX_FLOW_COLUMN);
+		lv_obj_set_flex_align(tile, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+		lv_obj_t *label = lv_obj_get_child(tile, TILE_LABEL_CHILD);
+		if (label) {
+			lv_obj_set_width(label, lv_pct(100));
+			lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+		}
+	}
+}
+
+void gridpage_set_tile_caption(lv_obj_t *grid, int index, const char *text) {
+	lv_obj_t *tile = grid_tile_at(grid, index);
+	if (!tile || !text) {
+		return;
+	}
+	lv_obj_t *label = lv_obj_get_child(tile, TILE_LABEL_CHILD);
+	if (label) {
+		lv_label_set_text(label, text); // account names are data, not keys
+	}
+}
+
+void gridpage_set_tile_label_lines(lv_obj_t *grid, int index, int lines) {
+	lv_obj_t *tile = grid_tile_at(grid, index);
+	if (!tile || lines < 1) {
+		return;
+	}
+	lv_obj_t *label = lv_obj_get_child(tile, TILE_LABEL_CHILD);
+	if (!label) {
+		return;
+	}
+	lv_label_set_long_mode(label, lines > 1 ? LV_LABEL_LONG_WRAP : LV_LABEL_LONG_DOT);
+	lv_obj_set_height(label, lines * (int)lv_font_get_line_height(&font_ui_24_bold));
+}

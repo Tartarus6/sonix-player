@@ -2,6 +2,7 @@
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
@@ -26,14 +27,15 @@ void streamturn_release(void) {
 	pthread_mutex_unlock(&lock);
 }
 
-// Three registrants -- Qobuz, Tidal, podcasts -- plus margin.
+// Qobuz, Tidal, podcasts, Jellyfin and Subsonic register abandon hooks when
+// their streaming pages are active, plus margin for plugin candidates.
 //
 // The table has its own lock: registration comes from the main thread at
 // startup, from the card supervisor thread (inserting a card redoes set_root)
 // and from the UI thread, while the readers are the pages' workers. Without it
 // the count can become visible before the function it counts -- one preemption
 // between two instructions -- and the call lands on a null pointer.
-#define ABANDON_MAX 4
+#define ABANDON_MAX 8
 static pthread_mutex_t abandon_lock = PTHREAD_MUTEX_INITIALIZER;
 static streamturn_abandon_fn abandon_fns[ABANDON_MAX];
 static int abandon_count;
@@ -43,14 +45,21 @@ void streamturn_register_abandon(streamturn_abandon_fn fn) {
 		return;
 	}
 	pthread_mutex_lock(&abandon_lock);
-	bool known = abandon_count >= ABANDON_MAX;
+	bool known = false;
 	for (int i = 0; i < abandon_count && !known; i++) {
 		known = abandon_fns[i] == fn;
 	}
-	if (!known) {
-		abandon_fns[abandon_count] = fn;
-		abandon_count++;
+	if (known) {
+		pthread_mutex_unlock(&abandon_lock);
+		return;
 	}
+	if (abandon_count >= ABANDON_MAX) {
+		fprintf(stderr, "streamturn: abandon table full (%d), ignoring registration\n", ABANDON_MAX);
+		pthread_mutex_unlock(&abandon_lock);
+		return;
+	}
+	abandon_fns[abandon_count] = fn;
+	abandon_count++;
 	pthread_mutex_unlock(&abandon_lock);
 }
 

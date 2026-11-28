@@ -35,6 +35,16 @@ typedef struct {
 // tiles change does not have to build its grid again.
 void gridpage_set_tile(lv_obj_t *grid, int index, const lv_image_dsc_t *icon, const char *label);
 
+// Compatibility helpers for the ported V1 streaming pages. They restyle an
+// existing tile in place; on the HiBy panels the glyph stays unadorned and the
+// caption uses the ordinary tile text style.
+void gridpage_set_tile_icon_style(lv_obj_t *grid, int index, const lv_image_dsc_t *icon, int icon_size,
+								  bool recolor, lv_color_t color, bool glow);
+void gridpage_set_tile_icon_size(lv_obj_t *grid, int index, int icon_size);
+void gridpage_set_tile_orientation(lv_obj_t *grid, int index, bool horizontal);
+void gridpage_set_tile_caption(lv_obj_t *grid, int index, const char *text);
+void gridpage_set_tile_label_lines(lv_obj_t *grid, int index, int lines);
+
 lv_obj_t *gridpage_build(lv_obj_t *screen, gui_config_t *cfg, const grid_entry_t *entries, int count, int columns, int rows,
 					bool clear_corner_buttons);
 

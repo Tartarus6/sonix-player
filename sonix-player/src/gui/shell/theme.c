@@ -406,6 +406,18 @@ void theme_set_accent(int index) {
 	refresh_all();
 }
 
+bool theme_uses_function_glyphs(void) { return false; }
+
+lv_color_t theme_semantic_color(theme_semantic_t role) {
+	// The HiBy palettes have always used one accent for every icon. Keeping
+	// that mapping here means the ported streaming pages inherit the active
+	// theme (including user accents) instead of freezing a second palette.
+	if (role == THEME_SEMANTIC_MUTED) {
+		return active->text_secondary;
+	}
+	return active->accent;
+}
+
 bool theme_dynamic_tint(void) { return dynamic_tint; }
 
 void theme_set_dynamic_tint(bool on) {

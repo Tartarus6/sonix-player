@@ -103,6 +103,7 @@ void dbus_w_variant_string(dbus_writer_t *w, const char *value);
 void dbus_w_variant_bool(dbus_writer_t *w, bool value);
 void dbus_w_variant_u16(dbus_writer_t *w, uint16_t value);
 void dbus_w_variant_u32(dbus_writer_t *w, uint32_t value);
+void dbus_w_variant_i64(dbus_writer_t *w, int64_t value);
 
 // ---------------------------------------------------------------------------
 // Reading a body

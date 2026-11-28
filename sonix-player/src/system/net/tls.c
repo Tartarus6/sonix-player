@@ -366,6 +366,17 @@ static void explain_failure(SSL *ssl, int ret, char *err, size_t err_size) {
 	}
 }
 
+tls_verify_t tls_verify_mode(void) { return TLS_VERIFY_STRICT; }
+
+void tls_set_verify_mode(tls_verify_t mode) {
+	// Strict is the only mode this build supports: the device's OpenSSL has
+	// peer and hostname verification enabled, and relaxing it for one service
+	// would leave every other connection on the same shared SSL_CTX exposed.
+	(void)mode;
+}
+
+bool tls_relaxed_supported(void) { return false; }
+
 tls_conn_t *tls_client(int fd, const char *hostname, char *err, size_t err_size) {
 	if (err && err_size) {
 		err[0] = '\0';

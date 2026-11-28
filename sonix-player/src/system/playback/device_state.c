@@ -425,18 +425,22 @@ static void queue_persist(void) {
 
 void device_state_queue_changed(void) { queue_persist(); }
 
-// One per streaming service plus headroom: four is already twice as many as
-// exist.
-#define PREPARE_CB_MAX 4
+// One per streaming service (Qobuz, Tidal, podcasts, Jellyfin, SoundCloud,
+// Subsonic) plus headroom for plugin candidates enabled by SONIX_V1_STREAMING.
+#define PREPARE_CB_MAX 8
 static device_state_prepare_cb prepare_cbs[PREPARE_CB_MAX];
 static int prepare_cb_count;
 
 void device_state_add_prepare_cb(device_state_prepare_cb cb) {
-	if (!cb || prepare_cb_count >= PREPARE_CB_MAX) {
+	if (!cb)
+		return;
+	if (prepare_cb_count >= PREPARE_CB_MAX) {
+		fprintf(stderr, "device_state: prepare callback table full (%d), ignoring registration\n",
+				PREPARE_CB_MAX);
 		return;
 	}
 	// Registering twice would mean preparing the same track twice. The cost is
-	// one walk over four entries, once at start-up.
+	// one walk over a handful of entries, once at start-up.
 	for (int i = 0; i < prepare_cb_count; i++) {
 		if (prepare_cbs[i] == cb) {
 			return;
@@ -1314,6 +1318,13 @@ bool device_state_advance_auto(char *out_path, size_t out_size) {
 	char path[512];
 	playlist_resync_to_current();
 
+	// "Play once": stop after this track, with no album/folder chaining. A music
+	// mode, so a podcast's ordered queue is left to play on as it always did.
+	if (!playlist_is_ordered() && playlist_get_mode() == PLAYBACK_MODE_STOP_AFTER) {
+		playhistory_left();
+		return false;
+	}
+
 	// The end of a record or of a folder, asked before the queue is advanced
 	// rather than after it fails to advance.
 	//
@@ -1362,6 +1373,10 @@ void device_state_read_ahead(double position, double total) {
 	// queue, which record or folder follows (if any) is decided when the track
 	// ends, so there is nothing to read ahead of.
 	if (audiobook_is_playing() && !audiobook_has_next_part()) {
+		return;
+	}
+	if (!audiobook_is_playing() && !playlist_is_ordered() &&
+		playlist_get_mode() == PLAYBACK_MODE_STOP_AFTER) {
 		return;
 	}
 	if (playlist_at_end() && playlist_get_mode() != PLAYBACK_MODE_REPEAT_ONE) {

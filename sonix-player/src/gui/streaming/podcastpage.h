@@ -73,6 +73,11 @@ void podcastpage_feed_download_many(const int *indices, int count, const char *f
 // its podcast's list is asked for, and it plays with the ones after it.
 void podcastpage_resume(const podcaststate_t *state);
 
+// Episode order shared by the followed-podcast page and the ported saved
+// episodes list. Default: newest first, as in the V1 fork.
+bool podcastpage_episodes_newest_first(void);
+void podcastpage_set_episodes_newest_first(bool newest);
+
 // The cover at the head of a podcast's page, from its address.
 void podcastpage_hero_request(const char *url, int size);
 bool podcastpage_hero_take(cover_image_t *out, bool *finished);

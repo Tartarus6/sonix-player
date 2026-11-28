@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "src/gui/fonts/fonts.h"
+#include "src/system/core/config.h"
 #include "src/system/playback/sleeptimer.h"
 #include "src/gui/shell/icons.h"
 #include "src/gui/shell/keyboard.h"
@@ -4029,4 +4030,15 @@ void podcastpage_init(gui_config_t *cfg) {
 	refresh_notes();
 
 	lv_obj_add_event_cb(podcast_screen, page_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
+}
+
+// Shared with the ported saved-episodes list so a sort change in one list is
+// visible in the other on the next open. The config key is the V1 fork's.
+bool podcastpage_episodes_newest_first(void) {
+	return config_get_int("podcast", "newest_first", 1) != 0;
+}
+
+void podcastpage_set_episodes_newest_first(bool newest) {
+	config_set_int("podcast", "newest_first", newest ? 1 : 0);
+	config_save();
 }

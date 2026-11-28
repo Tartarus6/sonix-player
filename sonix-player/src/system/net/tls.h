@@ -60,6 +60,23 @@ typedef struct tls_conn tls_conn_t;
 // Returns NULL on failure, with a human-readable reason in `err` -- meant to
 // be shown to the user, so it is in the same language as the rest of the
 // player. The socket is left alone: the caller still owns and closes it.
+// Certificate policy asked for by a streaming account page. The unified
+// player always verifies peers and hostname; the compatibility accessor lets
+// the ported pages show the strict setting, and the setter deliberately does
+// not weaken it on the HiBy firmware.
+typedef enum {
+	TLS_VERIFY_STRICT = 0,
+	TLS_VERIFY_RELAXED = 1,
+} tls_verify_t;
+
+tls_verify_t tls_verify_mode(void);
+void tls_set_verify_mode(tls_verify_t mode);
+
+// False on builds where the setter is a no-op. Setting pages use this to hide
+// a "relaxed certificate" control that could not take effect, instead of
+// offering a switch that silently does nothing.
+bool tls_relaxed_supported(void);
+
 tls_conn_t *tls_client(int fd, const char *hostname, char *err, size_t err_size);
 
 // Same shapes as recv()/send(): >0 bytes moved, 0 for a clean end of stream,

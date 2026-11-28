@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "src/gui/fonts/fonts.h"
+#include "src/gui/board_profile.h"
 #include "src/gui/shell/icons.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/shell/switcher.h"
@@ -1041,4 +1042,85 @@ void settingsrow_duration_repaint(settingsrow_duration_t *d) {
 	}
 	paint_duration_roller(d->hours);
 	paint_duration_roller(d->minutes);
+}
+
+// ---------------------------------------------------------------------------
+// Compatibility helpers for the ported V1 streaming pages
+// ---------------------------------------------------------------------------
+//
+// The V1 fork had richer row decorations. These wrappers give the ported pages
+// the same facilities using the existing styles and geometry: on the HiBy
+// panels the result is an ordinary themed row with a small leading glyph.
+
+static lv_obj_t *settingsrow_add_leading_icon(lv_obj_t *row, const lv_image_dsc_t *source, theme_semantic_t tone) {
+	if (!row || !source) {
+		return NULL;
+	}
+	lv_obj_t *icon = lv_image_create(row);
+	lv_image_set_src(icon, source);
+	lv_obj_add_style(icon, &theme_style_icon, 0);
+	lv_obj_set_style_image_recolor(icon, theme_semantic_color(tone), 0);
+	lv_obj_set_style_image_recolor_opa(icon, LV_OPA_COVER, 0);
+	int side = bp_pick(18, 24);
+	lv_obj_set_size(icon, side, side);
+	lv_obj_align(icon, LV_ALIGN_LEFT_MID, 0, 0);
+	lv_obj_set_clickable(icon, false);
+
+	// The name label is child 0 of a row built by settingsrow_add(); move it
+	// past the glyph rather than replacing it, so all the existing fitting and
+	// theme-refresh callbacks still find it.
+	lv_obj_t *name = settingsrow_name_label(row);
+	if (name) {
+		lv_obj_set_x(name, side + 8);
+	}
+	return icon;
+}
+
+void settingsrow_add_icon(lv_obj_t *row, const lv_image_dsc_t *source, theme_semantic_t tone) {
+	settingsrow_add_leading_icon(row, source, tone);
+}
+
+void settingsrow_add_accent_icon(lv_obj_t *row, const lv_image_dsc_t *source) {
+	settingsrow_add_leading_icon(row, source, THEME_SEMANTIC_BLUE);
+}
+
+void settingsrow_add_caption(lv_obj_t *row, const char *text) {
+	lv_obj_t *name = settingsrow_name_label(row);
+	if (!row || !text || !name) {
+		return;
+	}
+	lv_obj_t *caption = lv_label_create(row);
+	lv_label_set_text(caption, tr(text));
+	lv_obj_add_style(caption, &theme_style_text_dim, 0);
+	lv_obj_set_style_text_font(caption, &font_ui_14, 0);
+	lv_label_set_long_mode(caption, LV_LABEL_LONG_DOT);
+	lv_obj_set_width(caption, lv_pct(100));
+	lv_obj_align_to(caption, name, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 2);
+	lv_obj_set_clickable(caption, false);
+}
+
+void settingsrow_place_corner_button(lv_obj_t *button, gui_config_t *cfg, int slot) {
+	if (!button || !cfg || slot < 0) {
+		return;
+	}
+	int size = bp_header_button_size();
+	int gap = bp_pick(4, 6);
+	lv_obj_set_size(button, size, size);
+	lv_obj_align(button, LV_ALIGN_TOP_RIGHT, -cfg->padding - slot * (size + gap),
+				 cfg->padding + cfg->top_bar_height);
+}
+
+void settingsrow_scale_corner_icon(lv_obj_t *icon, gui_config_t *cfg) {
+	if (!icon || !cfg || !bp_is_compact()) {
+		return;
+	}
+	// Same reduction as the fork's compact corner glyphs: ~34 px sources are
+	// drawn at about 25 px on the 240 px panel.
+	lv_image_set_scale(icon, 192);
+}
+
+void settingsrow_title_realign(lv_obj_t *title) {
+	// Titles are positioned once by settingsrow_title() in this tree; no
+	// realignment is needed after a refresh.
+	(void)title;
 }

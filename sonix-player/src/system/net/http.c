@@ -799,7 +799,9 @@ bool http_request(const char *url, const http_req_t *req, char **out, size_t *ou
 	snprintf(current, sizeof(current), "%s", url);
 
 	// The request changes hop by hop: after a redirect that changes the
-	// method, what gets re-sent is a GET with no body.
+	// method, what gets re-sent is a GET with no body. A redirect to another
+	// authority drops the body as well (see below), so a POST's payload is
+	// never replayed there.
 	http_req_t hop_req = *req;
 
 	for (int hop = 0; hop <= HTTP_MAX_REDIRECTS; hop++) {
@@ -845,13 +847,44 @@ bool http_request(const char *url, const http_req_t *req, char **out, size_t *ou
 		// A relative Location keeps the scheme and authority it came from; an
 		// absolute one may switch between http and https, and plenty of hosts
 		// answer port 80 with nothing but a redirect to their https self.
+		// Validate the next hop before contacting it: authenticated API calls
+		// must never be downgraded from https to cleartext. Neither headers
+		// nor a request body may follow a redirect to another authority.
+		char next[2600];
 		if (location[0] == '/') {
 			char base[512];
 			snprintf(base, sizeof(base), "%s://%s:%d", u.secure ? "https" : "http", u.host, u.port);
-			snprintf(current, sizeof(current), "%s%s", base, location);
+			snprintf(next, sizeof(next), "%s%s", base, location);
 		} else {
-			snprintf(current, sizeof(current), "%s", location);
+			snprintf(next, sizeof(next), "%s", location);
 		}
+		url_t next_u;
+		if (!url_parse(next, &next_u)) {
+			set_last_error(tr("http_bad_address"), next);
+			return false;
+		}
+		if (u.secure && !next_u.secure) {
+			set_last_error("https to http redirect refused: %s", next);
+			return false;
+		}
+		if (u.secure != next_u.secure || strcasecmp(u.host, next_u.host) != 0 || u.port != next_u.port) {
+			// 307 and 308 keep the method and body verbatim, and jf_authenticate()
+			// puts the user's password in that body. Refuse a non-GET/HEAD
+			// request here rather than replay it against a different origin.
+			// Same-authority redirects keep the method and body unchanged.
+			const char *method = hop_req.method && hop_req.method[0] ? hop_req.method : "GET";
+			if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0) {
+				set_last_error("cross-origin %d redirect with %s method refused: %s", status, method, next);
+				return false;
+			}
+			// Defence in depth: even a GET that carries a body must not send
+			// it to the new authority. Content-Type belongs to that body.
+			hop_req.extra_headers = NULL;
+			hop_req.body = NULL;
+			hop_req.body_len = 0;
+			hop_req.content_type = NULL;
+		}
+		snprintf(current, sizeof(current), "%s", next);
 	}
 	return false;
 }
@@ -867,8 +900,18 @@ static conn_t stream_conn(http_stream_t *st) {
 	return c;
 }
 
+// Closes a socket that never became a stream. http_stream_open_ex() observers
+// need to be told with -1 before it goes, so a cancellation arriving during
+// setup cannot leave their published descriptor pointing at a reused fd.
+static void close_pending_conn(conn_t conn, const http_stream_options_t *opts) {
+	if (opts && opts->socket_cb) {
+		opts->socket_cb(opts->socket_user, -1);
+	}
+	conn_close(&conn);
+}
+
 static bool stream_open_once(http_stream_t *st, const char *url, int timeout_secs, int *status_out,
-							 char *location, size_t location_size) {
+							 char *location, size_t location_size, const http_stream_options_t *opts) {
 	url_t u;
 	if (!url_parse(url, &u)) {
 		return false;
@@ -887,36 +930,49 @@ static bool stream_open_once(http_stream_t *st, const char *url, int timeout_sec
 	int one = 1;
 	setsockopt(conn.fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
+	if (opts && opts->socket_cb && !opts->socket_cb(opts->socket_user, conn.fd)) {
+		close_pending_conn(conn, opts);
+		return false;
+	}
+
 	char host_header[300];
 	host_header_value(&u, host_header, sizeof(host_header));
+
+	const char *agent = (opts && opts->user_agent) ? opts->user_agent : HTTP_USER_AGENT;
+	const char *extra = (opts && opts->extra_headers) ? opts->extra_headers : "";
+	const char *icy = (opts && opts->no_icy) ? "" : "Icy-MetaData: 1\r\n";
 
 	char request[2600];
 	int n = snprintf(request, sizeof(request),
 					 "GET %s HTTP/1.0\r\n" // 1.0: no chunking, no keep-alive to argue about
 					 "Host: %s\r\n"
-					 "User-Agent: " HTTP_USER_AGENT "\r\n"
-					 "Icy-MetaData: 1\r\n"
+					 "User-Agent: %s\r\n"
+					 "%s"
 					 "Accept: */*\r\n"
+					 "%s"
 					 "\r\n",
-					 u.path, host_header);
+					 u.path, host_header, agent, icy, extra);
 	// As above: snprintf returns what it would have written, not what it did.
 	if (n <= 0 || (size_t)n >= sizeof(request) || !conn_write_all(&conn, request, (size_t)n)) {
-		conn_close(&conn);
+		close_pending_conn(conn, opts);
 		return false;
 	}
 
 	char headers[HTTP_HEADER_BUFFER];
 	int status = read_headers(&conn, headers, sizeof(headers), st->lead, sizeof(st->lead), &st->lead_len);
 	*status_out = status;
+	if (opts && opts->status_out) {
+		*opts->status_out = status;
+	}
 
 	if (status >= 300 && status < 400) {
 		location[0] = '\0';
 		header_value(headers, "Location", location, location_size);
-		conn_close(&conn);
+		close_pending_conn(conn, opts);
 		return false;
 	}
 	if (status != 200) {
-		conn_close(&conn);
+		close_pending_conn(conn, opts);
 		return false;
 	}
 
@@ -949,7 +1005,8 @@ static bool stream_open_once(http_stream_t *st, const char *url, int timeout_sec
 	return true;
 }
 
-bool http_stream_open(http_stream_t *st, const char *url, int timeout_secs) {
+bool http_stream_open_ex(http_stream_t *st, const char *url, int timeout_secs,
+						 const http_stream_options_t *opts) {
 	if (!st || !url) {
 		return false;
 	}
@@ -963,26 +1020,54 @@ bool http_stream_open(http_stream_t *st, const char *url, int timeout_secs) {
 	for (int hop = 0; hop <= HTTP_MAX_REDIRECTS; hop++) {
 		int status = 0;
 		char location[2048] = "";
-		if (stream_open_once(st, current, timeout_secs, &status, location, sizeof(location))) {
+		// Credentials go on the first hop only: a redirect to another host
+		// must not receive the account's auth header.
+		http_stream_options_t hop_opts;
+		const http_stream_options_t *call_opts = opts;
+		if (opts) {
+			hop_opts = *opts;
+			if (hop > 0) {
+				hop_opts.extra_headers = NULL;
+			}
+			call_opts = &hop_opts;
+		}
+		if (stream_open_once(st, current, timeout_secs, &status, location, sizeof(location), call_opts)) {
 			return true;
 		}
 		if (status < 300 || status >= 400 || !location[0]) {
 			return false;
 		}
 
+		// Relative targets keep the scheme and authority of the hop that
+		// answered; absolute ones are followed verbatim. Refuse an https ->
+		// http downgrade when the caller asked for it (Jellyfin streams do).
+		url_t u;
+		if (!url_parse(current, &u)) {
+			return false;
+		}
+		char next[2600];
 		if (location[0] == '/') {
-			url_t u;
-			if (!url_parse(current, &u)) {
-				return false;
-			}
 			char base[512];
 			snprintf(base, sizeof(base), "%s://%s:%d", u.secure ? "https" : "http", u.host, u.port);
-			snprintf(current, sizeof(current), "%s%s", base, location);
+			snprintf(next, sizeof(next), "%s%s", base, location);
 		} else {
-			snprintf(current, sizeof(current), "%s", location);
+			snprintf(next, sizeof(next), "%s", location);
 		}
+		url_t next_u;
+		if (!url_parse(next, &next_u)) {
+			return false;
+		}
+		if (u.secure && !next_u.secure && opts && opts->no_https_downgrade) {
+			set_last_error("https to http redirect refused: %s", next);
+			return false;
+		}
+		snprintf(current, sizeof(current), "%s", next);
 	}
 	return false;
+}
+
+bool http_stream_open(http_stream_t *st, const char *url, int timeout_secs) {
+	return http_stream_open_ex(st, url, timeout_secs, NULL);
 }
 
 // Reads exactly `len` raw bytes (lead buffer first, then the socket).
