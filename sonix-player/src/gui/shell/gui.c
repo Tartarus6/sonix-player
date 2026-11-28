@@ -37,6 +37,7 @@
 #include "src/gui/wireless/sonixlink.h"
 #include "src/gui/gearboy/gearboypage.h"
 #include "src/gui/gearboy/gearboysettings.h"
+#include "src/gui/crossyroad/crossyroad.h"
 #include "src/gui/flappybird/flappybird.h"
 #include "src/gui/gearboy/gearboyplay.h"
 #include "src/gui/shell/lowbattery.h"
@@ -635,6 +636,7 @@ void gui_init(gui_config_t *cfg) {
 	gearboypage_screen = lv_obj_create(NULL);
 	gearboyplay_screen = lv_obj_create(NULL);
 	flappybird_screen = lv_obj_create(NULL);
+	crossyroad_screen = lv_obj_create(NULL);
 	metronomepage_screen = lv_obj_create(NULL);
 
 	// Persistent topbar that stays above every screen.
@@ -682,6 +684,7 @@ void gui_init(gui_config_t *cfg) {
 	gearboysettings_init(cfg); // before the page: its gear opens this
 	gearboypage_init(cfg);
 	flappybird_init(cfg);
+	crossyroad_init(cfg);
 	metronomepage_init(cfg);
 	// before morepage: the books tile opens the shelf, and the shelf opens the
 	// reader.
