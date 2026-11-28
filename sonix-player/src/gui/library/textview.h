@@ -26,4 +26,8 @@ void textview_init(gui_config_t *cfg);
 // file cannot be read.
 bool textview_open(const char *path);
 
+// The same page for text already in memory (the Notes editor uses it for a
+// note too long to edit). `footer`, when given, is shown as a dimmed last line.
+bool textview_open_text(const char *title, const char *text, const char *footer, bool truncated);
+
 #endif /* TEXTVIEW_H */

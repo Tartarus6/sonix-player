@@ -1,0 +1,63 @@
+{
+  "image": "sonix-packer/r1.upt",
+  "expect_device": "r1",
+  "checks": {
+    "file_exists": {
+      "status": "PASS",
+      "evidence": "49936384 bytes"
+    },
+    "iso_magic": {
+      "status": "PASS",
+      "evidence": "CD001 at 0x8001"
+    },
+    "iso_readable": {
+      "status": "PASS",
+      "evidence": "101 ISO members"
+    },
+    "required_metadata": {
+      "status": "PASS",
+      "evidence": "ota_config.in, ota_v0/ota_update.in, ota_v0/ota_compatibility.in, ota_v0/ota_v0.ok"
+    },
+    "ota_components": {
+      "status": "PASS",
+      "evidence": "kernel and rootfs declared"
+    },
+    "compatibility_present": {
+      "status": "PASS",
+      "evidence": "'hiby_r1_x1600_auto_rf_auto'"
+    },
+    "kernel_integrity": {
+      "status": "PASS",
+      "evidence": "6 chunks, size 2940992, md5 b48580b0fb42504b2871414a54d0c068, chain and manifest verified"
+    },
+    "rootfs_integrity": {
+      "status": "PASS",
+      "evidence": "89 chunks, size 46575616, md5 5cc32df7651ff36e94619560eb3b335b, chain and manifest verified"
+    },
+    "device_identity": {
+      "status": "PASS",
+      "evidence": "device-name=HiBy R1"
+    },
+    "wrong_device_rejection": {
+      "status": "PASS",
+      "evidence": "observed 'HiBy R1' matches expected 'HiBy R1'"
+    }
+  },
+  "observed_device": "HiBy R1",
+  "compatibility": "hiby_r1_x1600_auto_rf_auto",
+  "components": [
+    {
+      "name": "kernel",
+      "size": 2940992,
+      "md5": "b48580b0fb42504b2871414a54d0c068",
+      "chunks": 6
+    },
+    {
+      "name": "rootfs",
+      "size": 46575616,
+      "md5": "5cc32df7651ff36e94619560eb3b335b",
+      "chunks": 89
+    }
+  ],
+  "result": "STRUCTURAL PASS (flashability NOT established)"
+}

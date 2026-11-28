@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "src/gui/board_profile.h"
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/icons.h"
 #include "src/gui/nowplaying/player.h"
@@ -1041,4 +1042,83 @@ void settingsrow_duration_repaint(settingsrow_duration_t *d) {
 	}
 	paint_duration_roller(d->hours);
 	paint_duration_roller(d->minutes);
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for the ported V1 apps
+//
+// The regular values are the ones the HiBy layouts have always used (56 px
+// corner buttons, 6 px gap, 14 px of air by the heading). bp_pick() keeps them
+// untouched there and supplies the compact values on the V1.
+// ---------------------------------------------------------------------------
+
+int settingsrow_corner_button_size(gui_config_t *cfg) {
+	(void)cfg;
+	return bp_pick(36, CORNER_BTN_SIZE);
+}
+
+void settingsrow_place_corner_button(lv_obj_t *button, gui_config_t *cfg, int slot) {
+	if (!button || !cfg || slot < 0) {
+		return;
+	}
+	int size = settingsrow_corner_button_size(cfg);
+	int gap = bp_pick(4, CORNER_SLOT_GAP);
+	lv_obj_set_size(button, size, size);
+	lv_obj_align(button, LV_ALIGN_TOP_RIGHT, -cfg->padding - slot * (size + gap),
+				 cfg->padding + cfg->top_bar_height);
+}
+
+void settingsrow_scale_corner_icon(lv_obj_t *icon, gui_config_t *cfg) {
+	if (!icon || !cfg || !bp_is_compact()) {
+		return;
+	}
+	lv_image_set_scale(icon, 192);
+}
+
+int settingsrow_header_text_left(gui_config_t *cfg) {
+	if (!cfg) {
+		return 0;
+	}
+	return cfg->padding + settingsrow_corner_button_size(cfg) + bp_pick(6, 14);
+}
+
+int settingsrow_header_text_top(gui_config_t *cfg) {
+	if (!cfg) {
+		return 0;
+	}
+	return cfg->top_bar_height + cfg->padding + bp_pick(6, 10);
+}
+
+void settingsrow_add_icon(lv_obj_t *row, const lv_image_dsc_t *source, theme_semantic_t tone) {
+	if (!row || !source) {
+		return;
+	}
+	lv_obj_t *icon = lv_image_create(row);
+	lv_image_set_src(icon, source);
+	lv_obj_add_style(icon, &theme_style_icon, 0);
+	lv_obj_set_style_image_recolor(icon, theme_semantic_color(tone), 0);
+	lv_obj_set_style_image_recolor_opa(icon, LV_OPA_COVER, 0);
+	lv_obj_set_clickable(icon, false);
+	lv_obj_set_scrollable(icon, false);
+	int side = bp_pick(18, 24);
+	int w = (int)source->header.w, h = (int)source->header.h;
+	int max = LV_MAX(w, h);
+	if (max > 0) {
+		lv_obj_set_size(icon, LV_MAX(1, w * side / max), LV_MAX(1, h * side / max));
+		lv_image_set_scale(icon, (uint32_t)(LV_SCALE_NONE * side / max));
+	}
+	lv_obj_align(icon, LV_ALIGN_LEFT_MID, 0, 0);
+	lv_obj_move_to_index(icon, 0);
+}
+
+void settingsrow_add_caption(lv_obj_t *row, const char *text) {
+	if (!row || !text) {
+		return;
+	}
+	lv_obj_t *caption = lv_label_create(row);
+	lv_label_set_text(caption, tr(text));
+	lv_obj_add_style(caption, &theme_style_text_dim, 0);
+	lv_obj_set_style_text_font(caption, &font_ui_14, 0);
+	lv_label_set_long_mode(caption, LV_LABEL_LONG_DOT);
+	lv_obj_set_width(caption, lv_pct(100));
 }

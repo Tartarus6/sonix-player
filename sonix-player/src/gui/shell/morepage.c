@@ -6,6 +6,12 @@
 #include "src/gui/audio/metronomepage.h"
 #include "src/gui/ebook/ebookpage.h"
 #include "src/gui/flappybird/flappybird.h"
+#include "src/gui/games/dino.h"
+#include "src/gui/games/game2048.h"
+#include "src/gui/games/snake.h"
+#include "src/gui/calculator/calculator.h"
+#include "src/gui/notes/notes.h"
+#include "src/gui/pet/petpage.h"
 #include "src/gui/library/filespage.h"
 #include "src/gui/gearboy/gearboypage.h"
 #include "src/gui/shell/gridpage.h"
@@ -33,13 +39,22 @@ void morepage_init(gui_config_t *cfg) {
 		// An action: the artwork is read from the resource tree on the way in.
 		{"flappy_bird", &icon_menu_flappy_bird, NULL, flappybird_open},
 		{"metronome", &icon_menu_metronome, &metronomepage_screen, NULL},
+		// The four ported V1 app groups. Each is an action: 2048 restores its
+		// board, Notes reads the card and the pet loads its state on the way in.
+		{"2048", &icon_menu_game_2048, NULL, game2048_open},
+		{"snake", &icon_menu_game_snake, NULL, snake_open},
+		{"dino", &icon_menu_game_dino, NULL, dino_open},
+		{"calculator", &icon_menu_calculator, NULL, calculator_open},
+		{"notes", &icon_menu_notes, NULL, notes_open},
+		{"pet", &icon_menu_pet, NULL, petpage_open},
 	};
 
 	// Two columns by three rows, like the Music and Wireless pages, so a tile
-	// here is exactly the size of a tile there. The grid is laid out as full
-	// even with fewer entries, so the only tile sits where it would with six --
-	// top left -- instead of floating in the middle of a page of its own.
-	gridpage_build(morepage_screen, cfg, entries, (int)(sizeof(entries) / sizeof(entries[0])), 2, 3, true);
+	// here is exactly the size of a tile there. With the V1 apps there are more
+	// than six entries, so the page scrolls: the last row would otherwise sit
+	// below the panel on the 240x320 V1.
+	lv_obj_t *grid = gridpage_build(morepage_screen, cfg, entries, (int)(sizeof(entries) / sizeof(entries[0])), 2, 3, true);
+	gridpage_set_scrolling(grid);
 
 	settingsrow_title(morepage_screen, cfg, "more");
 }

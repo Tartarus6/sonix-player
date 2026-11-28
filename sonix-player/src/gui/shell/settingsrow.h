@@ -2,6 +2,7 @@
 #define SETTINGSROW_H
 
 #include "src/gui/shell/gui.h"
+#include "src/gui/shell/theme.h"
 
 #include "lvgl/lvgl.h"
 
@@ -59,6 +60,20 @@ lv_obj_t *settingsrow_action(lv_obj_t *parent, const char *name, lv_event_cb_t c
 // otherwise it goes back to the quiet themed one. For rows whose page carries
 // something that can be switched on (Equaliser, MSEB).
 void settingsrow_chevron_active(lv_obj_t *row, bool active);
+
+// Geometry and small helpers used by the ported V1 apps. They keep the same
+// corner-button placement on the HiBy panels and use the compact sizes on the
+// V1, exactly as the apps' bp_pick() call sites do.
+int settingsrow_corner_button_size(gui_config_t *cfg);
+void settingsrow_place_corner_button(lv_obj_t *button, gui_config_t *cfg, int slot);
+void settingsrow_scale_corner_icon(lv_obj_t *icon, gui_config_t *cfg);
+int settingsrow_header_text_left(gui_config_t *cfg);
+int settingsrow_header_text_top(gui_config_t *cfg);
+
+// A semantic-colour glyph at the start of a row, and a dimmed line of copy
+// underneath the row's name. Both are snapshots of the current theme.
+void settingsrow_add_icon(lv_obj_t *row, const lv_image_dsc_t *source, theme_semantic_t tone);
+void settingsrow_add_caption(lv_obj_t *row, const char *text);
 
 // A card with a name, its current value on the right, and a slider underneath
 // that snaps to whole steps. `steps` is how many positions it has; the caller

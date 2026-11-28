@@ -278,6 +278,40 @@ const theme_palette_t *theme(void) { return active; }
 
 bool theme_is_dark(void) { return active->dark; }
 
+// Semantic role colours for the ported V1 apps. Both HiBy palettes keep their
+// existing accent for every role: nothing in this tree calls this function
+// yet, so adding it cannot change a HiBy screen. The fixed hues are the ones
+// the V1 fork's Tokyo Night palette used, which is what the ported glyphs were
+// drawn against.
+bool theme_is_tokyo_night(void) { return false; }
+bool theme_is_monochrome(void) { return false; }
+
+lv_color_t theme_on_accent(void) {
+	// The accent is #3584e4 on both HiBy palettes, so the ink on it stays
+	// white. Checking the channel sum keeps this right if a preset changes.
+	return lv_color_luminance(active->accent) > 160 ? lv_color_black() : lv_color_white();
+}
+
+lv_color_t theme_semantic_color(theme_semantic_t role) {
+	switch (role) {
+	case THEME_SEMANTIC_CYAN:
+		return (lv_color_t)LV_COLOR_MAKE(125, 207, 255);
+	case THEME_SEMANTIC_PURPLE:
+		return (lv_color_t)LV_COLOR_MAKE(187, 154, 247);
+	case THEME_SEMANTIC_GREEN:
+		return (lv_color_t)LV_COLOR_MAKE(158, 206, 106);
+	case THEME_SEMANTIC_AMBER:
+		return (lv_color_t)LV_COLOR_MAKE(224, 175, 104);
+	case THEME_SEMANTIC_RED:
+		return (lv_color_t)LV_COLOR_MAKE(247, 118, 142);
+	case THEME_SEMANTIC_MUTED:
+		return active->text_secondary;
+	case THEME_SEMANTIC_BLUE:
+	default:
+		return active->accent;
+	}
+}
+
 void theme_set_dark(bool dark) {
 	if (active->dark == dark) {
 		return;

@@ -28,6 +28,7 @@ extern const lv_image_dsc_t icon_autoeq_update;
 extern const lv_image_dsc_t icon_repeat_all;
 extern const lv_image_dsc_t icon_repeat_one;
 extern const lv_image_dsc_t icon_repeat_off;
+extern const lv_image_dsc_t icon_repeat_stop;
 extern const lv_image_dsc_t icon_play;
 extern const lv_image_dsc_t icon_pause;
 extern const lv_image_dsc_t icon_stop;
@@ -265,5 +266,17 @@ extern const lv_image_dsc_t icon_menu_metronome;
 extern const lv_image_dsc_t icon_qobuz_badge;
 extern const lv_image_dsc_t icon_tidal_badge;
 extern const lv_image_dsc_t icon_podcast_badge;
+
+// Glyphs used by the ported V1 apps, from icons_v1apps.c.
+extern const lv_image_dsc_t icon_heart_filled;
+extern const lv_image_dsc_t icon_pencil;
+extern const lv_image_dsc_t icon_notes;
+extern const lv_image_dsc_t icon_enter;
+extern const lv_image_dsc_t icon_menu_game_2048;
+extern const lv_image_dsc_t icon_menu_game_snake;
+extern const lv_image_dsc_t icon_menu_game_dino;
+extern const lv_image_dsc_t icon_menu_calculator;
+extern const lv_image_dsc_t icon_menu_notes;
+extern const lv_image_dsc_t icon_menu_pet;
 
 #endif // ICONS_H

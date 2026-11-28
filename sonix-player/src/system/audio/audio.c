@@ -5,6 +5,7 @@
 #include "src/system/decode/growfile.h"
 #include "src/system/decode/sndfile.h"
 #include "src/system/audio/replaygain.h"
+#include "src/system/audio/wavparse.h"
 #include "src/system/audio/speed.h"
 #include "src/system/audio/swvolume.h"
 #include "src/system/audio/eq.h"
@@ -130,36 +131,6 @@ static void pcm_restart_after_pause(snd_pcm_t *pcm) {
 			err < 0 ? snd_strerror(err) : "ok");
 }
 
-
-// The sample encodings the WAV path reads. The device is opened at S16_LE for
-// the first two and at S32_LE, left-justified, for the rest -- the same format
-// the decoded path uses for 24-bit sources.
-typedef enum {
-	WAV_PCM_U8,
-	WAV_PCM_S16,
-	WAV_PCM_S24, // packed, three bytes a sample
-	WAV_PCM_S32,
-	WAV_FLOAT32,
-	WAV_FLOAT64,
-} wav_sample_t;
-
-typedef struct {
-	int channels;
-	int sample_rate;
-	int bits_per_sample; // as stored in the file, for the format line
-	wav_sample_t sample;
-	int src_frame_bytes; // one frame as stored in the file
-	int out_bits;		 // 16 or 32: what the device is opened with
-	// 64-bit: long is 32 bits on the device, and a 24/96 stereo file passes
-	// 2 GB after about an hour.
-	int64_t data_offset;
-	int64_t data_size;
-} wav_info_t;
-
-// parse_wav() results.
-#define WAV_OK 0
-#define WAV_BAD -1		   // not a WAV, or a broken one
-#define WAV_UNSUPPORTED -2 // a sound WAV in an encoding this path does not read
 
 // The ALSA device playback opens. "default" is the DAC behind the jacks;
 // Bluetooth swaps in a bluealsa PCM name so the stream goes to the
@@ -605,123 +576,7 @@ static int stream_bitrate_kbps = 0;
 static bool stream_lossy = false;
 static char stream_codec[16] = "";
 
-// Little-endian readers for the header fields.
-static uint16_t le16(const unsigned char *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
-static uint32_t le32(const unsigned char *p) {
-	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-#define WAVE_FORMAT_PCM 0x0001
-#define WAVE_FORMAT_IEEE_FLOAT 0x0003
-#define WAVE_FORMAT_EXTENSIBLE 0xFFFE
-
-static int parse_wav(const char *filepath, wav_info_t *info, FILE **file_out) {
-	FILE *f = fopen(filepath, "rb");
-	if (!f) {
-		fprintf(stderr, "Audio: Failed to open file: %s\n", filepath);
-		return WAV_BAD;
-	}
-
-	memset(info, 0, sizeof(*info));
-
-	unsigned char riff[12];
-	if (fread(riff, 1, sizeof(riff), f) != sizeof(riff) || memcmp(riff, "RIFF", 4) != 0 ||
-		memcmp(riff + 8, "WAVE", 4) != 0) {
-		fclose(f);
-		return WAV_BAD;
-	}
-
-	if (fseeko(f, 0, SEEK_END) != 0) {
-		fclose(f);
-		return WAV_BAD;
-	}
-	int64_t file_end = (int64_t)ftello(f);
-	fseeko(f, (off_t)sizeof(riff), SEEK_SET);
-
-	int tag = 0;
-	int bits = 0;
-	bool have_fmt = false;
-
-	unsigned char head[8];
-	while (fread(head, 1, sizeof(head), f) == sizeof(head)) {
-		uint32_t size = le32(head + 4);
-		int64_t body = (int64_t)ftello(f);
-		if (body < 0) {
-			break;
-		}
-
-		if (memcmp(head, "fmt ", 4) == 0) {
-			// Up to the end of WAVEFORMATEXTENSIBLE: 16 bytes of WAVEFORMAT, the
-			// extension size, valid bits, channel mask and the sub-format GUID,
-			// whose first two bytes are the real format tag.
-			unsigned char fmt[40];
-			size_t want = size < sizeof(fmt) ? size : sizeof(fmt);
-			if (size < 16 || fread(fmt, 1, want, f) != want) {
-				fclose(f);
-				return WAV_BAD;
-			}
-			tag = le16(fmt);
-			info->channels = le16(fmt + 2);
-			info->sample_rate = (int)le32(fmt + 4);
-			bits = le16(fmt + 14);
-			if (tag == WAVE_FORMAT_EXTENSIBLE) {
-				tag = want >= 26 ? le16(fmt + 24) : 0;
-			}
-			have_fmt = true;
-		} else if (memcmp(head, "data", 4) == 0) {
-			info->data_offset = body;
-			// 0 and 0xFFFFFFFF are what a writer leaves when it never went back
-			// to fill the length in, and a length past the end of the file is
-			// a truncated copy: in all three cases the audio runs to the end.
-			int64_t declared = (int64_t)size;
-			if (size == 0 || size == 0xFFFFFFFFu || body + declared > file_end) {
-				declared = file_end - body;
-			}
-			info->data_size = declared;
-			break;
-		}
-
-		// Chunks are padded to an even length.
-		if (fseeko(f, (off_t)(body + (int64_t)size + (size & 1)), SEEK_SET) != 0) {
-			break;
-		}
-	}
-
-	if (!have_fmt || !info->data_offset || info->channels <= 0 || info->channels > 8 || info->sample_rate <= 0) {
-		fclose(f);
-		return WAV_BAD;
-	}
-
-	info->bits_per_sample = bits;
-	if (tag == WAVE_FORMAT_PCM && bits == 8) {
-		info->sample = WAV_PCM_U8;
-	} else if (tag == WAVE_FORMAT_PCM && bits == 16) {
-		info->sample = WAV_PCM_S16;
-	} else if (tag == WAVE_FORMAT_PCM && bits == 24) {
-		info->sample = WAV_PCM_S24;
-	} else if (tag == WAVE_FORMAT_PCM && bits == 32) {
-		info->sample = WAV_PCM_S32;
-	} else if (tag == WAVE_FORMAT_IEEE_FLOAT && bits == 32) {
-		info->sample = WAV_FLOAT32;
-	} else if (tag == WAVE_FORMAT_IEEE_FLOAT && bits == 64) {
-		info->sample = WAV_FLOAT64;
-	} else {
-		fprintf(stderr, "audio: '%s' is WAV format 0x%04x at %d bits, not read by the WAV path\n", filepath, tag,
-				bits);
-		fclose(f);
-		return WAV_UNSUPPORTED;
-	}
-
-	info->src_frame_bytes = info->channels * (bits / 8);
-	info->out_bits = (info->sample == WAV_PCM_U8 || info->sample == WAV_PCM_S16) ? 16 : 32;
-
-	// Whole frames only.
-	info->data_size -= info->data_size % info->src_frame_bytes;
-
-	fseeko(f, (off_t)info->data_offset, SEEK_SET);
-	*file_out = f;
-	return WAV_OK;
-}
+// The WAV parser lives in wavparse.c so it can be tested on its own.
 
 // Turns `frames` frames read from the file into the samples the device takes.
 // Only called for the encodings that need it: S16 and S32 are read straight
@@ -2651,7 +2506,7 @@ static void seek_flush(snd_pcm_t *pcm, bool already_dropped) {
 static void play_wav_file(const char *filepath) {
 	FILE *f = NULL;
 	wav_info_t info;
-	int parsed = parse_wav(filepath, &info, &f);
+	int parsed = wav_parse(filepath, &info, &f);
 	// ADPCM, a-law and the rest: libsndfile reads them, and the decoded path
 	// plays what it hands over.
 	if (parsed == WAV_UNSUPPORTED && sndfile_available()) {
@@ -4118,6 +3973,10 @@ int audio_init(void) {
 int audio_play(const char *filepath) {
 	fprintf(stderr, "audio[%ld]: play requested '%s'\n", log_ms(), filepath);
 
+	// Real playback takes the PCM over from the silent keep-alive; two clients
+	// on the same BlueALSA transport would fight over it.
+	audio_bt_keepalive_stop();
+
 	// NO route write here: this runs on the UI thread while the previous
 	// track's PCM may still be open, and poking "Output Port Switch" with a
 	// configured stream up stalls the DMA (the after-headphone-plug wedge).
@@ -4521,6 +4380,111 @@ void audio_seek(double seconds) {
 // where the sound goes
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Idle A2DP keep-alive
+//
+// A car head unit that sees an OPEN but never STARTed A2DP stream drops the
+// link after a few seconds. BlueALSA sends AVDTP START only when a PCM client
+// acquires the transport, so with nothing playing we hold a silent PCM open.
+// A real audio_play() stops it before opening its own PCM.
+// ---------------------------------------------------------------------------
+
+static pthread_mutex_t bt_keep_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t bt_keep_tid;
+static bool bt_keep_valid;
+static volatile bool bt_keep_run;
+static char bt_keep_dev[160];
+static unsigned bt_keep_rate;
+
+static void bt_keep_mark_stopped(void) {
+	pthread_mutex_lock(&bt_keep_lock);
+	bt_keep_run = false;
+	bt_keep_valid = false;
+	pthread_mutex_unlock(&bt_keep_lock);
+}
+
+static void *bt_keep_thread(void *unused) {
+	(void)unused;
+	char dev[160];
+	unsigned rate;
+	pthread_mutex_lock(&bt_keep_lock);
+	snprintf(dev, sizeof(dev), "%s", bt_keep_dev);
+	rate = bt_keep_rate;
+	pthread_mutex_unlock(&bt_keep_lock);
+
+	snd_pcm_t *pcm = NULL;
+	if (snd_pcm_open(&pcm, dev, SND_PCM_STREAM_PLAYBACK, 0) < 0) {
+		fprintf(stderr, "audio[%ld]: Bluetooth keep-alive could not open '%s'\n", log_ms(), dev);
+		bt_keep_mark_stopped();
+		return NULL;
+	}
+	if (snd_pcm_set_params(pcm, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED, 2, rate, 1, 100000) < 0) {
+		fprintf(stderr, "audio[%ld]: Bluetooth keep-alive could not set '%s' to %u Hz\n", log_ms(), dev, rate);
+		snd_pcm_close(pcm);
+		bt_keep_mark_stopped();
+		return NULL;
+	}
+
+	// Zero-filled interleaved stereo frames. Writing them keeps BlueALSA's
+	// transport acquired and started; no sound comes out of the car.
+	static int16_t silence[2048];
+	fprintf(stderr, "audio[%ld]: Bluetooth keep-alive on '%s' (%u Hz)\n", log_ms(), dev, rate);
+	while (bt_keep_run) {
+		snd_pcm_sframes_t n = snd_pcm_writei(pcm, silence, 1024);
+		if (n == -EPIPE || n == -ESTRPIPE) {
+			snd_pcm_recover(pcm, n, 1);
+			continue;
+		}
+		if (n < 0) {
+			fprintf(stderr, "audio[%ld]: Bluetooth keep-alive write failed (%ld)\n", log_ms(), (long)n);
+			break;
+		}
+	}
+	snd_pcm_close(pcm);
+	bt_keep_mark_stopped();
+	fprintf(stderr, "audio[%ld]: Bluetooth keep-alive stopped\n", log_ms());
+	return NULL;
+}
+
+void audio_bt_keepalive_start(const char *pcm, unsigned rate) {
+	if (!pcm || !pcm[0] || strncmp(pcm, "bluealsa", 8) != 0) {
+		return;
+	}
+	audio_bt_keepalive_stop();
+
+	pthread_mutex_lock(&bt_keep_lock);
+	snprintf(bt_keep_dev, sizeof(bt_keep_dev), "%s", pcm);
+	bt_keep_rate = rate ? rate : 48000;
+	bt_keep_run = true;
+	bt_keep_valid = true;
+	if (pthread_create(&bt_keep_tid, NULL, bt_keep_thread, NULL) != 0) {
+		bt_keep_run = false;
+		bt_keep_valid = false;
+		fprintf(stderr, "audio[%ld]: Bluetooth keep-alive thread failed\n", log_ms());
+	}
+	pthread_mutex_unlock(&bt_keep_lock);
+}
+
+bool audio_bt_keepalive_active(void) {
+	pthread_mutex_lock(&bt_keep_lock);
+	bool active = bt_keep_valid && bt_keep_run;
+	pthread_mutex_unlock(&bt_keep_lock);
+	return active;
+}
+
+void audio_bt_keepalive_stop(void) {
+	pthread_mutex_lock(&bt_keep_lock);
+	if (!bt_keep_valid) {
+		pthread_mutex_unlock(&bt_keep_lock);
+		return;
+	}
+	bt_keep_run = false;
+	pthread_t tid = bt_keep_tid;
+	bt_keep_valid = false;
+	pthread_mutex_unlock(&bt_keep_lock);
+	pthread_join(tid, NULL);
+}
+
 void audio_set_output_device(const char *pcm) {
 	pthread_mutex_lock(&output_lock);
 	char before[sizeof(output_pcm)];
@@ -4540,6 +4504,10 @@ void audio_set_output_device(const char *pcm) {
 
 	if (strcmp(before, after) != 0) {
 		fprintf(stderr, "audio[%ld]: the output moves from '%s' to '%s'\n", log_ms(), before, after);
+	}
+	// No reason to hold an A2DP stream open once the output is elsewhere.
+	if (strncmp(after, "bluealsa", 8) != 0) {
+		audio_bt_keepalive_stop();
 	}
 }
 

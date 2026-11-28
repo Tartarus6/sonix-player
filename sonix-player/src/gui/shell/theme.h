@@ -5,6 +5,31 @@
 
 #include "lvgl/lvgl.h"
 
+// Fixed semantic accents used by the ported V1 apps' small status glyphs.
+// The player's own pages keep using the palette below; this enum only gives
+// an app a stable name for a role colour instead of a hard-coded RGB value.
+typedef enum {
+	THEME_SEMANTIC_BLUE,
+	THEME_SEMANTIC_CYAN,
+	THEME_SEMANTIC_PURPLE,
+	THEME_SEMANTIC_GREEN,
+	THEME_SEMANTIC_AMBER,
+	THEME_SEMANTIC_RED,
+	THEME_SEMANTIC_MUTED,
+} theme_semantic_t;
+
+lv_color_t theme_semantic_color(theme_semantic_t role);
+
+// Ink to draw on the accent colour: white on the HiBy palettes, black on a
+// light enough accent. Used by the ported apps' filled keys and buttons.
+lv_color_t theme_on_accent(void);
+
+// The ported V1 pages ask which palette family is active. This tree has only
+// the two HiBy palettes, so both questions are always false and the pages take
+// their ordinary accent-coloured path.
+bool theme_is_tokyo_night(void);
+bool theme_is_monochrome(void);
+
 // The handful of colours the whole UI is built from. Two presets (dark and
 // light) live in theme.c; everything on screen pulls from the active one.
 typedef struct {

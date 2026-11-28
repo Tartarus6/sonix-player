@@ -193,6 +193,14 @@ double audio_get_speed(void);
 void audio_set_output_device(const char *pcm);
 void audio_get_output_device(char *out, size_t out_size);
 
+// A head unit that sees an OPEN-but-idle A2DP stream closes it after a few
+// seconds. BlueALSA only sends AVDTP START when a PCM client acquires the
+// transport, so with nothing playing we hold a silent PCM open to keep the
+// link alive. Real playback stops this before it opens its own PCM.
+void audio_bt_keepalive_start(const char *pcm, unsigned rate);
+void audio_bt_keepalive_stop(void);
+bool audio_bt_keepalive_active(void);
+
 // Whether the stream is going out over Bluetooth. Asked outside this file by
 // the software volume, which stands down there: on A2DP the level belongs to
 // the headphones (AVRCP absolute volume), and ot_devices.json says the same

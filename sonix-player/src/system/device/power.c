@@ -1383,9 +1383,11 @@ static void suspend_if_idle(uint32_t now, bool playing) {
 // showing a stale value for a whole period.
 //
 // A page registers its timer here once and then forgets about it; power.c
-// never looks at what the timer does.
+// never looks at what the timer does. Slots are only ever added, never freed,
+// so leave room past the timers already registered elsewhere (topbar, games,
+// pet, player, library, flappybird) rather than dropping a late registration.
 // ---------------------------------------------------------------------------
-#define STANDBY_TIMERS_MAX 16
+#define STANDBY_TIMERS_MAX 20
 static lv_timer_t *g_standby_timers[STANDBY_TIMERS_MAX];
 // 0 = paused outright while the panel is dark. Anything else = kept running,
 // at that period instead of its own. A timer that only paints can be stopped;
