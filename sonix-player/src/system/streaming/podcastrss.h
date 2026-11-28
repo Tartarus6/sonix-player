@@ -48,4 +48,8 @@ int podcastrss_episodes(long long feed_id, podcast_episode_t *out, int max, int 
 bool podcastrss_feed(long long feed_id, podcast_feed_t *out);
 bool podcastrss_episode(long long feed_id, long long episode_id, podcast_episode_t *out);
 
+// Fetch one episode's publisher notes. On success, the caller owns *text;
+// otherwise it is NULL. Does not use or fill the episode-list cache.
+podcast_notes_result_t podcastrss_episode_notes(long long feed_id, long long episode_id, char **text);
+
 #endif /* PODCASTRSS_H */

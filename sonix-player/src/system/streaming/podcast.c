@@ -530,3 +530,12 @@ double podcast_speed(void) { return (double)podcast_speed_permille() / 1000.0; }
 bool podcast_stop_at_episode_end(void) { return config_get_int("podcast", "stop_episode_end", 0) != 0; }
 
 void podcast_set_stop_at_episode_end(bool on) { config_set_int("podcast", "stop_episode_end", on ? 1 : 0); }
+
+podcast_notes_result_t podcast_episode_notes(long long feed_id, long long episode_id, char **text) {
+	if (!podcastrss_is_id(feed_id) || !podcastrss_is_id(episode_id)) {
+		*text = NULL;
+		return PODCAST_NOTES_UNAVAILABLE;
+	}
+	rss_find(feed_id);
+	return podcastrss_episode_notes(feed_id, episode_id, text);
+}

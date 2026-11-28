@@ -25,6 +25,7 @@
 #include "src/gui/shell/tabbar.h"
 #include "src/gui/shell/theme.h"
 #include "src/gui/shell/toast.h"
+#include "src/gui/streaming/podcastnotes.h"
 #include "src/gui/streaming/podcastpage.h"
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
@@ -510,6 +511,7 @@ static char feed_error[256];
 
 // The page whose episode menu is open.
 static page_t *menu_page;
+static long long notes_feed_id, notes_episode_id;
 
 // The titles come in from the tags on a thread of their own, a file at a time:
 // reading four hundred files' tags before drawing anything would be seconds of
@@ -1486,6 +1488,11 @@ static void delete_cb(void *user) {
 	confirm_show("podcast_delete_from_card", e->title, "delete", delete_confirmed, NULL);
 }
 
+static void show_notes_cb(void *user) {
+	(void)user;
+	podcastnotes_open(notes_feed_id, notes_episode_id, false);
+}
+
 static void open_menu(page_t *p, lv_obj_t *anchor, int index) {
 	menu_page = p;
 	p->menu_shown = index;
@@ -1493,30 +1500,45 @@ static void open_menu(page_t *p, lv_obj_t *anchor, int index) {
 	if (!e) {
 		return;
 	}
+	// The visible row may move while the popover is open.
+	notes_feed_id = notes_episode_id = 0;
+	if (p->feed) {
+		const podcast_episode_t *item = podcastpage_feed_episode(e->item);
+		if (item) {
+			notes_feed_id = item->feed_id;
+			notes_episode_id = item->id;
+		}
+	} else if (e->path && podcastcache_feed_id(e->path, &notes_feed_id)) {
+		notes_episode_id = podcastcache_episode_id(e->path);
+	}
 	// Separate tables for the two states rather than a label chosen with a
 	// ternary: the string collector reads initialisers.
 	static const popover_item_t CARD_UNHEARD[] = {
+		{"podcast_show_notes", show_notes_cb, NULL},
 		{"podcast_mark_heard", mark_cb, (void *)1},
 		{"podcast_play_next", play_next_cb, NULL},
 		{"podcast_delete_from_card_short", delete_cb, NULL},
 	};
 	static const popover_item_t CARD_HEARD[] = {
+		{"podcast_show_notes", show_notes_cb, NULL},
 		{"podcast_mark_unheard", mark_cb, NULL},
 		{"podcast_play_next", play_next_cb, NULL},
 		{"podcast_delete_from_card_short", delete_cb, NULL},
 	};
 	static const popover_item_t FEED_UNHEARD[] = {
+		{"podcast_show_notes", show_notes_cb, NULL},
 		{"podcast_mark_heard", mark_cb, (void *)1},
 		{"podcast_play_next", play_next_cb, NULL},
 		{"podcast_download", download_cb, NULL},
 	};
 	static const popover_item_t FEED_HEARD[] = {
+		{"podcast_show_notes", show_notes_cb, NULL},
 		{"podcast_mark_unheard", mark_cb, NULL},
 		{"podcast_play_next", play_next_cb, NULL},
 		{"podcast_download", download_cb, NULL},
 	};
 	const popover_item_t *items = p->feed ? (e->played ? FEED_HEARD : FEED_UNHEARD) : (e->played ? CARD_HEARD : CARD_UNHEARD);
-	popover_show(anchor, items, 3);
+	popover_show(anchor, items, sizeof(CARD_UNHEARD) / sizeof(*CARD_UNHEARD));
 }
 
 static void row_menu_cb(lv_event_t *e) {
