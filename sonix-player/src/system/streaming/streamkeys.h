@@ -23,6 +23,10 @@
 //     client_id = ...
 //     client_secret = ...
 //
+//     [soundcloud]
+//     client_id = ...
+//     client_secret = ...
+//
 //     [podcast]
 //     api_key = ...
 //     api_secret = ...
@@ -72,6 +76,13 @@ const char *streamkeys_podcast_secret(void);
 // every call with the MD5 of the sorted parameters plus the secret.
 const char *streamkeys_lastfm_key(void);
 const char *streamkeys_lastfm_secret(void);
+
+// SoundCloud. Registered as a confidential OAuth client: both values are
+// needed for the authorization-code exchange and for token refresh.
+const char *streamkeys_soundcloud_client_id(void);
+const char *streamkeys_soundcloud_client_secret(void);
+// Must match the redirect URI registered with the app. NULL uses the default.
+const char *streamkeys_soundcloud_redirect_uri(void);
 
 // Where they were read from, for the log and the information page. NULL when
 // none were found.

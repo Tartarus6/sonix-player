@@ -101,6 +101,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 - **Tidal** - sign in with the code on screen or the QR code. Low, High, CD and Hi-Res quality. Search, albums, artists, playlists, favourites, new releases, most streamed and recommended. You can add and remove favourites and manage your playlists from the player.
 - **Qobuz** - sign in with your account. MP3 320, FLAC 16/44.1, 24/96 and 24/192. Search, albums, artists, playlists, favourites and new releases. You can add and remove favourites and manage your playlists from the player.
+- **SoundCloud** - sign in with a code from your browser. Search tracks and playlists, play liked tracks and reposts, open playlists, and add or remove likes from the player. Playback uses progressive MP3 streams. SoundCloud's AAC streams need HLS fMP4, which this player cannot open, so those tracks stay unavailable.
 - **Radio** - thousands of stations by country, language or genre, plus search, favourites and recently played. MP3, AAC and FLAC stations.
   > **My stations** - write your own list in a `radio.txt` file in the root of the card, one station per line: `name, address`.
 - **ListenBrainz** - scrobbles what you listen to to ListenBrainz with a user token. Without Wi-Fi the plays are kept and sent the next time the player connects.

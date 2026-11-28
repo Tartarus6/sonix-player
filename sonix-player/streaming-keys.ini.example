@@ -6,6 +6,13 @@ app_secret =
 client_id =
 client_secret =
 
+[soundcloud]
+client_id =
+client_secret =
+; Must match the redirect URI registered for this app. Optional: the player
+; uses https://tartarus6.github.io/sonix-player/soundcloud/callback by default.
+redirect_uri =
+
 [podcast]
 api_key =
 api_secret =

@@ -867,8 +867,8 @@ static conn_t stream_conn(http_stream_t *st) {
 	return c;
 }
 
-static bool stream_open_once(http_stream_t *st, const char *url, int timeout_secs, int *status_out,
-							 char *location, size_t location_size) {
+static bool stream_open_once(http_stream_t *st, const char *url, const char *extra_headers, int timeout_secs,
+							 int *status_out, char *location, size_t location_size) {
 	url_t u;
 	if (!url_parse(url, &u)) {
 		return false;
@@ -890,15 +890,19 @@ static bool stream_open_once(http_stream_t *st, const char *url, int timeout_sec
 	char host_header[300];
 	host_header_value(&u, host_header, sizeof(host_header));
 
-	char request[2600];
+	// Signed audio URLs run to two thousand characters, and an OAuth header
+	// adds several hundred more. The old 2600-byte buffer cut both; snprintf's
+	// length check below is only useful if the buffer can hold a real request.
+	char request[4096];
 	int n = snprintf(request, sizeof(request),
 					 "GET %s HTTP/1.0\r\n" // 1.0: no chunking, no keep-alive to argue about
 					 "Host: %s\r\n"
 					 "User-Agent: " HTTP_USER_AGENT "\r\n"
 					 "Icy-MetaData: 1\r\n"
 					 "Accept: */*\r\n"
+					 "%s"
 					 "\r\n",
-					 u.path, host_header);
+					 u.path, host_header, extra_headers ? extra_headers : "");
 	// As above: snprintf returns what it would have written, not what it did.
 	if (n <= 0 || (size_t)n >= sizeof(request) || !conn_write_all(&conn, request, (size_t)n)) {
 		conn_close(&conn);
@@ -949,7 +953,7 @@ static bool stream_open_once(http_stream_t *st, const char *url, int timeout_sec
 	return true;
 }
 
-bool http_stream_open(http_stream_t *st, const char *url, int timeout_secs) {
+bool http_stream_open_ex(http_stream_t *st, const char *url, const char *extra_headers, int timeout_secs) {
 	if (!st || !url) {
 		return false;
 	}
@@ -963,7 +967,10 @@ bool http_stream_open(http_stream_t *st, const char *url, int timeout_secs) {
 	for (int hop = 0; hop <= HTTP_MAX_REDIRECTS; hop++) {
 		int status = 0;
 		char location[2048] = "";
-		if (stream_open_once(st, current, timeout_secs, &status, location, sizeof(location))) {
+		// One chance for the headers. A 302 from an API to its CDN is the
+		// common case, and the CDN must never see the caller's token.
+		if (stream_open_once(st, current, hop == 0 ? extra_headers : NULL, timeout_secs, &status, location,
+							 sizeof(location))) {
 			return true;
 		}
 		if (status < 300 || status >= 400 || !location[0]) {
@@ -983,6 +990,10 @@ bool http_stream_open(http_stream_t *st, const char *url, int timeout_secs) {
 		}
 	}
 	return false;
+}
+
+bool http_stream_open(http_stream_t *st, const char *url, int timeout_secs) {
+	return http_stream_open_ex(st, url, NULL, timeout_secs);
 }
 
 // Reads exactly `len` raw bytes (lead buffer first, then the socket).

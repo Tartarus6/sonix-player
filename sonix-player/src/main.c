@@ -42,6 +42,7 @@
 #include "src/system/audio/headset.h"
 #include "src/system/input/keymap.h"
 #include "src/system/streaming/qobuz.h"
+#include "src/system/streaming/soundcloud.h"
 #include "src/system/streaming/tidal.h"
 #include "src/system/remote/dlna.h"
 #include "src/system/gearboy/gbdb.h"
@@ -49,6 +50,7 @@
 #include "src/system/remote/sonixlink.h"
 #include "src/system/core/panel.h"
 #include "src/system/streaming/qobuzcache.h"
+#include "src/system/streaming/soundcloudcache.h"
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/streaming/podcastsubs.h"
 #include "src/system/streaming/podcaststate.h"
@@ -1961,6 +1963,7 @@ int main(int argc, char **argv) {
 	streamkeys_init();
 	qobuz_init();
 	tidal_init();
+	soundcloud_init();
 	// lastfm_init();
 	listenbrainz_init();
 
@@ -2178,6 +2181,7 @@ int main(int argc, char **argv) {
 	const char *card_root = storage_sd_root();
 	qobuzcache_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
 	tidalcache_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
+	soundcloudcache_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
 	podcastcache_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
 	podcastsubs_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
 	podcaststate_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);

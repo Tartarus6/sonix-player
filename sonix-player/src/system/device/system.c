@@ -37,6 +37,7 @@
 #include "src/system/input/keymap.h"
 #include "src/system/core/panel.h"
 #include "src/system/streaming/qobuzcache.h"
+#include "src/system/streaming/soundcloudcache.h"
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/streaming/podcastsubs.h"
 #include "src/system/streaming/podcaststate.h"
@@ -864,6 +865,7 @@ static void card_databases_attach(const char *root) {
 	mseb_presets_set_dir(root);
 	qobuzcache_set_root(root);
 	tidalcache_set_root(root);
+	soundcloudcache_set_root(root);
 	podcastcache_set_root(root);
 	podcastsubs_set_root(root);
 	podcaststate_set_root(root);

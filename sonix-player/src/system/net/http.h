@@ -170,6 +170,15 @@ typedef struct {
 // fails, or the status is not 200.
 bool http_stream_open(http_stream_t *st, const char *url, int timeout_secs);
 
+// Like http_stream_open(), with headers added to the first request only.
+//
+// `extra_headers` holds lines already terminated with "\r\n", one per header,
+// or NULL. SoundCloud needs the OAuth token on the request to its own host,
+// which then redirects to a CDN. Sending it on the second hop would hand a
+// credential to a host that has no use for it, so the headers are dropped on
+// every redirect, including one that stays on the same host.
+bool http_stream_open_ex(http_stream_t *st, const char *url, const char *extra_headers, int timeout_secs);
+
 // Reads up to `len` bytes of *audio* into buf: any ICY metadata blocks in the
 // way are consumed and parsed out, never handed to the caller. Returns the
 // number of bytes read, 0 at end of stream, -1 on error.

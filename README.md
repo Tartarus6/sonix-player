@@ -317,9 +317,7 @@ player's update to a device that cannot survive it.
 
 ### Streaming keys
 
-Tidal, Qobuz, and Podcast Index need application keys, and they are
-not in this repository: provide your own. They go into the image sealed, so that unpacking
-it does not hand them out as a text file.
+Tidal, Qobuz, SoundCloud and Podcast Index need application keys. You provide them; this repository keeps none. The packer seals them into the image, so unpacking it does not hand out a text file. SoundCloud needs a registered confidential OAuth app: copy its client ID and secret into the `[soundcloud]` section. SoundCloud issues those apps to Artist Pro accounts. Register the redirect URI printed by the sign-in page, or set `redirect_uri` in that section to the one you registered.
 
 1. Copy `sonix-player/streaming-keys.ini.example` to
    `sonix-player/streaming-keys.ini` and fill it in.

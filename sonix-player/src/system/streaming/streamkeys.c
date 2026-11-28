@@ -25,6 +25,9 @@ static char podcast_key[64];
 static char podcast_secret[128];
 static char lastfm_key[64];
 static char lastfm_secret[64];
+static char soundcloud_client_id[64];
+static char soundcloud_client_secret[128];
+static char soundcloud_redirect_uri[256];
 static char source_path[256];
 static bool loaded_any;
 
@@ -120,6 +123,17 @@ static void parse_line(char *line, char section[32]) {
 		} else if (strcmp(key, "client_secret") == 0) {
 			dest = tidal_client_secret;
 			dest_size = sizeof(tidal_client_secret);
+		}
+	} else if (strcmp(section, "soundcloud") == 0) {
+		if (strcmp(key, "client_id") == 0) {
+			dest = soundcloud_client_id;
+			dest_size = sizeof(soundcloud_client_id);
+		} else if (strcmp(key, "client_secret") == 0) {
+			dest = soundcloud_client_secret;
+			dest_size = sizeof(soundcloud_client_secret);
+		} else if (strcmp(key, "redirect_uri") == 0) {
+			dest = soundcloud_redirect_uri;
+			dest_size = sizeof(soundcloud_redirect_uri);
 		}
 	}
 
@@ -260,7 +274,7 @@ void streamkeys_init(void) {
 	}
 
 	if (!path) {
-		printf("streamkeys: no %s, Tidal, Qobuz, podcasts and Last.fm stay off\n",
+		printf("streamkeys: no %s, Tidal, Qobuz, SoundCloud, podcasts and Last.fm stay off\n",
 			   configured && configured[0] ? configured : STREAMKEYS_PATH);
 		return;
 	}
@@ -270,9 +284,10 @@ void streamkeys_init(void) {
 	// The log records that the keys are present, never their values: the log
 	// lands on the card and from there goes to whoever asks for it about any
 	// problem at all.
-	printf("streamkeys: from %s -- Qobuz %s, Tidal %s, Podcast %s, Last.fm %s\n", path,
+	printf("streamkeys: from %s -- Qobuz %s, Tidal %s, SoundCloud %s, Podcast %s, Last.fm %s\n", path,
 		   qobuz_app_id[0] && qobuz_app_secret[0] ? "yes" : "no",
 		   tidal_client_id[0] && tidal_client_secret[0] ? "yes" : "no",
+		   soundcloud_client_id[0] && soundcloud_client_secret[0] ? "yes" : "no",
 		   podcast_key[0] && podcast_secret[0] ? "yes" : "no",
 		   lastfm_key[0] && lastfm_secret[0] ? "yes" : "no");
 }
@@ -289,5 +304,9 @@ const char *streamkeys_podcast_secret(void) { return or_null(podcast_secret); }
 
 const char *streamkeys_lastfm_key(void) { return or_null(lastfm_key); }
 const char *streamkeys_lastfm_secret(void) { return or_null(lastfm_secret); }
+
+const char *streamkeys_soundcloud_client_id(void) { return or_null(soundcloud_client_id); }
+const char *streamkeys_soundcloud_client_secret(void) { return or_null(soundcloud_client_secret); }
+const char *streamkeys_soundcloud_redirect_uri(void) { return or_null(soundcloud_redirect_uri); }
 
 const char *streamkeys_source(void) { return loaded_any ? source_path : NULL; }
