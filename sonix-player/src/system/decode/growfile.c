@@ -17,9 +17,11 @@ typedef struct {
 	long total; // final size, 0 when the server did not say
 	bool active;
 	bool failed;
+	uint64_t attempt;
 } slot_t;
 
 static slot_t slots[GROWFILE_MAX];
+static uint64_t next_attempt;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t grew = PTHREAD_COND_INITIALIZER;
 
@@ -69,6 +71,7 @@ void growfile_announce(const char *path, long total) {
 		slot->total = total;
 		slot->active = true;
 		slot->failed = false;
+		slot->attempt = ++next_attempt;
 		// Log the exact path being tracked: it is the reference when a caller
 		// asks whether a file is growing and gets told no for a file that is
 		// very much downloading.
@@ -126,6 +129,24 @@ bool growfile_is_growing(const char *path) {
 	bool growing = find_locked(path) != NULL;
 	pthread_mutex_unlock(&lock);
 	return growing;
+}
+
+uint64_t growfile_attempt(const char *path, bool *growing) {
+	uint64_t attempt = 0;
+	bool active = false;
+	pthread_mutex_lock(&lock);
+	for (int i = 0; path && i < GROWFILE_MAX; i++) {
+		const slot_t *slot = &slots[i];
+		if (slot->attempt > attempt && strcmp(slot->path, path) == 0) {
+			attempt = slot->attempt;
+			active = slot->active;
+		}
+	}
+	pthread_mutex_unlock(&lock);
+	if (growing) {
+		*growing = active;
+	}
+	return attempt;
 }
 
 // ---------------------------------------------------------------------------

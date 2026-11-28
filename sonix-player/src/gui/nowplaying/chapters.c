@@ -1,10 +1,12 @@
 #include "chapters.h"
 
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 
 #include "lvgl/lvgl.h"
 
@@ -14,6 +16,8 @@
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
 #include "src/system/core/lang.h"
+#include "src/system/core/utils.h"
+#include "src/system/decode/growfile.h"
 #include "src/system/library/id3chap.h"
 #include "src/system/playback/audiobook.h"
 #include "src/system/playback/device_state.h"
@@ -35,6 +39,23 @@ static bool listing_podcast;
 static char podcast_file[512];
 static id3chap_t *podcast_marks;
 static int podcast_count;
+static bool podcast_resolved;
+static struct stat podcast_source;
+static bool podcast_growing;
+static uint64_t podcast_attempt;
+static unsigned podcast_generation;
+
+typedef struct {
+	char path[sizeof(podcast_file)];
+	unsigned generation;
+	id3chap_t *marks;
+	int count;
+	bool done;
+} podcast_chapter_job_t;
+
+// Only the UI owns the job pointer. A worker publishes its result under the lock.
+static pthread_mutex_t podcast_job_lock = PTHREAD_MUTEX_INITIALIZER;
+static podcast_chapter_job_t *podcast_job;
 
 // A folder book lists its files here instead: each file is a chapter.
 static bool listing_parts;
@@ -61,8 +82,129 @@ static int compare_chapter_starts(const void *a, const void *b) {
 	return (first > second) - (first < second);
 }
 
-// Only read the tag when the podcast menu opens. An unfinished tag is
-// retried the next time, and the visible list keeps its original marks.
+bool chapters_podcast_supports(const char *path) {
+	const char *ext = path ? strrchr(path, '.') : NULL;
+	return ext && strcasecmp(ext, ".mp3") == 0;
+}
+
+static bool read_podcast_source(const char *path, struct stat *source) { return chapters_podcast_supports(path) && stat(path, source) == 0 && S_ISREG(source->st_mode); }
+
+// Negative means the tag is not ready. Zero means there are no chapter marks.
+static int read_podcast_marks(const char *path, id3chap_t **out) {
+	if (id3chap_tag_pending(path)) {
+		return -1;
+	}
+	id3chap_t *marks = calloc(MAX_ROWS, sizeof(*marks));
+	if (!marks) {
+		return -1;
+	}
+	int count = id3chap_read(path, marks, MAX_ROWS);
+	if (count <= 0) {
+		free(marks);
+		return 0;
+	}
+	count = count < MAX_ROWS ? count : MAX_ROWS;
+	qsort(marks, (size_t)count, sizeof(*marks), compare_chapter_starts);
+	*out = marks;
+	return count;
+}
+
+static void use_podcast_marks(id3chap_t *marks, int count) {
+	free(podcast_marks);
+	podcast_marks = marks;
+	podcast_count = count > 0 ? count : 0;
+	podcast_resolved = count >= 0;
+}
+
+static void select_podcast_source(const char *path) {
+	use_podcast_marks(NULL, -1);
+	podcast_generation++;
+	snprintf(podcast_file, sizeof(podcast_file), "%s", path);
+}
+
+static bool same_podcast_source(const char *path, const struct stat *source, uint64_t attempt, bool growing) {
+	if (strcmp(path, podcast_file) != 0 || attempt != podcast_attempt || source->st_dev != podcast_source.st_dev || source->st_ino != podcast_source.st_ino || source->st_size < podcast_source.st_size) {
+		return false;
+	}
+	// Audio added to an existing stream does not change its leading tag.
+	if (source->st_size > podcast_source.st_size) {
+		return growing || podcast_growing;
+	}
+	return source->st_mtim.tv_sec == podcast_source.st_mtim.tv_sec && source->st_mtim.tv_nsec == podcast_source.st_mtim.tv_nsec;
+}
+
+static void *read_podcast_chapters(void *arg) {
+	podcast_chapter_job_t *job = arg;
+	thread_be_background("podcast chapters");
+	job->count = read_podcast_marks(job->path, &job->marks);
+	pthread_mutex_lock(&podcast_job_lock);
+	job->done = true;
+	pthread_mutex_unlock(&podcast_job_lock);
+	return NULL;
+}
+
+static void take_podcast_chapters(void) {
+	pthread_mutex_lock(&podcast_job_lock);
+	podcast_chapter_job_t *finished = NULL;
+	if (podcast_job && podcast_job->done) {
+		finished = podcast_job;
+		podcast_job = NULL;
+	}
+	pthread_mutex_unlock(&podcast_job_lock);
+	if (!finished) {
+		return;
+	}
+	if (finished->generation == podcast_generation && finished->count >= 0) {
+		use_podcast_marks(finished->marks, finished->count);
+		finished->marks = NULL;
+	}
+	free(finished->marks);
+	free(finished);
+}
+
+static void start_podcast_chapters(void) {
+	podcast_chapter_job_t *job = calloc(1, sizeof(*job));
+	if (!job) {
+		return;
+	}
+	snprintf(job->path, sizeof(job->path), "%s", podcast_file);
+	job->generation = podcast_generation;
+	pthread_t thread;
+	int error = pthread_create(&thread, NULL, read_podcast_chapters, job);
+	if (error) {
+		fprintf(stderr, "podcast chapters: cannot start reader: %s\n", strerror(error));
+		free(job);
+		return;
+	}
+	podcast_job = job;
+	pthread_detach(thread);
+}
+
+void chapters_podcast_update(const char *path) {
+	if (listing_podcast && lv_screen_active() == chapters_screen) {
+		return; // the visible rows still refer to these marks
+	}
+	struct stat source;
+	if (read_podcast_source(path, &source)) {
+		bool growing;
+		uint64_t attempt = growfile_attempt(path, &growing);
+		if (!same_podcast_source(path, &source, attempt, growing)) {
+			select_podcast_source(path);
+		}
+		podcast_source = source;
+		podcast_growing = growing;
+		podcast_attempt = attempt;
+	} else if (podcast_file[0]) {
+		select_podcast_source("");
+	}
+	take_podcast_chapters();
+	if (podcast_file[0] && !podcast_resolved && !podcast_job) {
+		start_podcast_chapters();
+	}
+}
+
+// Check on menu open even if the worker has not finished. A retry can
+// replace a download at the same path after the title was cached.
 bool chapters_podcast_available(const char *path) {
 	if (!path || !path[0]) {
 		return false;
@@ -70,30 +212,18 @@ bool chapters_podcast_available(const char *path) {
 	if (listing_podcast && lv_screen_active() == chapters_screen) {
 		return podcast_count > 0 && strcmp(path, podcast_file) == 0;
 	}
-	// The same path can hold a fresh download the next time the menu opens.
-	free(podcast_marks);
-	podcast_marks = NULL;
-	podcast_count = 0;
-	const char *ext = strrchr(path, '.');
-	if (!ext || strcasecmp(ext, ".mp3") != 0 || id3chap_tag_pending(path)) {
+	struct stat source;
+	if (!read_podcast_source(path, &source)) {
+		select_podcast_source("");
 		return false;
 	}
-
-	// Read once, keeping only as many chapter rows as the list can show.
-	id3chap_t *marks = calloc(MAX_ROWS, sizeof(*marks));
-	if (!marks) {
-		return false;
-	}
-	int count = id3chap_read(path, marks, MAX_ROWS);
-	if (count <= 0) {
-		free(marks);
-		return false;
-	}
-	podcast_count = count < MAX_ROWS ? count : MAX_ROWS;
-	qsort(marks, (size_t)podcast_count, sizeof(*marks), compare_chapter_starts);
-	podcast_marks = marks;
-	snprintf(podcast_file, sizeof(podcast_file), "%s", path);
-	return true;
+	select_podcast_source(path);
+	podcast_source = source;
+	podcast_attempt = growfile_attempt(path, &podcast_growing);
+	id3chap_t *marks = NULL;
+	int count = read_podcast_marks(path, &marks);
+	use_podcast_marks(marks, count);
+	return podcast_count > 0;
 }
 
 static int podcast_chapter_at(const char *path, double seconds) {
@@ -105,6 +235,11 @@ static int podcast_chapter_at(const char *path, double seconds) {
 		}
 	}
 	return -1;
+}
+
+const char *chapters_podcast_title(const char *path, double seconds) {
+	int index = podcast_chapter_at(path, seconds);
+	return index < 0 ? "" : podcast_marks[index].title;
 }
 
 static void chapter_clicked_cb(lv_event_t *e) {
@@ -344,10 +479,10 @@ void chapters_open(void) {
 	open_list();
 }
 
-void chapters_open_podcast(void) {
+void chapters_open_podcast(const char *menu_path) {
 	device_state_t state;
 	device_state_get(&state);
-	if (podcast_count > 0 && strcmp(state.current_file, podcast_file) == 0) {
+	if (menu_path && podcast_count > 0 && strcmp(menu_path, state.current_file) == 0 && strcmp(menu_path, podcast_file) == 0) {
 		listing_podcast = true;
 		open_list();
 	}
