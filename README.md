@@ -1,8 +1,6 @@
 ﻿# Sonix Player
 
 > [!Note]
-> THIS IS THE SUCCESSOR TO M4ttia's SONIX REPO
-> 
 > Huge thanks for Jepl4r/M4ttia for being the one to start this project!
 
 A replacement player for the **HiBy R3 Pro II** and the **HiBy R1**, written on
