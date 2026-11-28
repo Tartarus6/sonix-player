@@ -200,7 +200,6 @@ static lv_obj_t *cover_placeholder_icon;
 static lv_obj_t *prev_btn_obj;
 static lv_obj_t *next_btn_obj;
 static lv_obj_t *more_btn_obj;
-static lv_obj_t *more_btn_icon; // ellipsis on a track, chapters on a book
 static lv_obj_t *repeat_btn_obj;
 static lv_obj_t *speed_btn_obj;	 // stands in the repeat button's place on a book
 static lv_obj_t *speed_btn_icon;
@@ -511,9 +510,8 @@ static void apply_audiobook_mode(bool book, bool podcast) {
 	// over a half-minute sponsor read. They are two separate settings on two
 	// separate pages (podcast settings, and Audiobooks -> change controls).
 	//
-	// Speed carries over too, as a setting of its own. Nothing else does: a
-	// podcast has no chapters, is not a single file, and sits in a real queue
-	// of episodes. Chapters and the book icon stay with books.
+	// Speed carries over as a setting of its own. Podcasts sit in a queue
+	// of episodes; a chapter jump stays within the current one.
 	bool skips = book || podcast;
 	int back = podcast && !book ? podcast_skip_back() : audiobook_skip_back();
 	int forward = podcast && !book ? podcast_skip_forward() : audiobook_skip_forward();
@@ -542,14 +540,6 @@ static void apply_audiobook_mode(bool book, bool podcast) {
 									: forward == AUDIOBOOK_SKIP_LONG ? &icon_next_30
 																	 : &icon_next_10);
 	}
-	// A book has a menu of its own behind the usual glyph: chapters,
-	// bookmarks, summary. On a podcast the same button goes straight to the
-	// episodes, the only thing wanted from it, rather than to a menu whose one
-	// useful entry would always be picked.
-	if (more_btn_icon) {
-		lv_image_set_src(more_btn_icon, podcast && !book ? &icon_podcast_episodes : &icon_ellipsis_vertical);
-	}
-
 	// The star and the repeat mode are about the music library and its queue.
 	// On a book they are not merely useless: starring would write a row into
 	// the music favourites for a file the music library does not index, and
@@ -823,6 +813,26 @@ static void update_queue_position(void) {
 	lv_label_set_text_fmt(queue_position_label, "%d/%d", (int)playlist_current_entry() + 1, count);
 }
 
+static void update_playback_context(const device_state_t *state, bool chapter_downloading) {
+	static bool showing_chapter;
+	bool chapter_title = podcast_mode && !audiobook_mode && chapters_podcast_supports(state->current_file);
+	chapters_podcast_update(chapter_title ? state->current_file : NULL);
+	if (!queue_position_label) {
+		return;
+	}
+	if (showing_chapter != chapter_title) {
+		showing_chapter = chapter_title;
+		lv_obj_set_width(queue_position_label, chapter_title ? lv_pct(52) : LV_SIZE_CONTENT);
+		lv_obj_set_height(queue_position_label, chapter_title ? lv_font_get_line_height(&font_ui_18) : LV_SIZE_CONTENT);
+	}
+	if (chapter_title) {
+		const char *title = chapter_downloading ? tr("podcast_downloading") : chapters_podcast_title(state->current_file, state->progress_current_secs);
+		lv_label_set_text(queue_position_label, title);
+	} else {
+		update_queue_position();
+	}
+}
+
 // Works out view_start and view_length for playback at `position` in a file
 // `total` seconds long. Asked on every poll rather than at a chapter change:
 // a seek, a skip or the book simply playing on moves into another chapter, and
@@ -886,10 +896,6 @@ static void set_progress_label(double current_secs, double total_secs) {
 
 	formatDoubleSeconds(view_length, progress_label_text, sizeof(progress_label_text));
 	lv_label_set_text(remaining_label, progress_label_text);
-
-	// Written from here because this is the one place that runs on every poll
-	// and on every track change, which is exactly when the answer can move.
-	update_queue_position();
 }
 
 // True while a decode is in flight at the worker.
@@ -3557,6 +3563,7 @@ static void refresh_now_playing(void) {
 	// a song.
 	apply_audiobook_mode(!state.live && audiobook_is_playing(),
 						 !state.live && podcastcache_is_episode(state.current_file));
+	update_playback_context(&state, podcast_mode && audio_chapter_waiting_for_download());
 
 	if (state.live) {
 		// The station on top, what it says is on air underneath -- the same
@@ -4189,7 +4196,8 @@ static void update_progress(void) {
 	// poll puts the interpolation back on the playback thread's own figure.
 	progress_anchor_secs = state.progress_current_secs;
 	progress_anchor_tick = lv_tick_get();
-	progress_running = state.status == AUDIO_STATUS_PLAYING && state.progress_total_secs > 0;
+	bool chapter_downloading = !state.live && audio_chapter_waiting_for_download();
+	progress_running = state.status == AUDIO_STATUS_PLAYING && state.progress_total_secs > 0 && !chapter_downloading;
 	smooth_timer_sync();
 
 	set_progress_label(state.progress_current_secs, current_total_length);
@@ -4208,6 +4216,7 @@ static void update_progress(void) {
 	// player dressed as a podcast over a song.
 	apply_audiobook_mode(!state.live && audiobook_is_playing(),
 						 !state.live && podcastcache_is_episode(state.current_file));
+	update_playback_context(&state, chapter_downloading);
 	update_format_label(&state); // the rate/bits settle shortly after the start
 
 	// The status LED follows playback promptly from here (the battery poll
@@ -4245,8 +4254,9 @@ static void update_progress(void) {
 		static audio_status_t episode_last_status = AUDIO_STATUS_STOPPED;
 		bool episode_changed = state.status != episode_last_status;
 		episode_last_status = state.status;
-		podcaststate_note(state.current_file, state.progress_current_secs, state.progress_total_secs,
-						  episode_changed);
+		if (state.progress_heard_position) {
+			podcaststate_note(state.current_file, state.progress_current_secs, state.progress_total_secs, episode_changed);
+		}
 	}
 
 	// "Remember track". The decision, and the writing, live in device_state.c:
@@ -4467,8 +4477,14 @@ static void book_summary_action(void *user) {
 	audiobookextras_open_current_summary();
 }
 
-// The overflow button: the book's menu on a book, the episode queue on a
-// podcast, the track menu on anything else.
+static void podcast_chapters_action(void *user) { chapters_open_podcast(user); }
+
+static void podcast_queue_action(void *user) {
+	(void)user;
+	trackmenu_open_queue();
+}
+
+// The overflow button shows the actions for the source that's playing.
 static void more_btn_event_cb(lv_event_t *e) {
 	if (audiobook_mode) {
 		static const popover_item_t BOOK_ITEMS[] = {
@@ -4480,10 +4496,21 @@ static void more_btn_event_cb(lv_event_t *e) {
 		popover_show(lv_event_get_current_target(e), BOOK_ITEMS, (int)(sizeof(BOOK_ITEMS) / sizeof(BOOK_ITEMS[0])));
 		return;
 	}
-	// A podcast has no chapters: it has episodes, and the episodes are already
-	// the queue. The button goes straight there.
 	if (podcast_mode) {
-		trackmenu_open_queue();
+		device_state_t state;
+		static char menu_path[sizeof(state.current_file)];
+		static const popover_item_t PODCAST_ITEMS[] = {
+			{"chapters", podcast_chapters_action, menu_path},
+			{"trackmenu_queue", podcast_queue_action, NULL},
+		};
+		device_state_get(&state);
+		lv_obj_t *anchor = lv_event_get_current_target(e);
+		if (chapters_podcast_available(state.current_file)) {
+			snprintf(menu_path, sizeof(menu_path), "%s", state.current_file);
+			popover_show(anchor, PODCAST_ITEMS, 2);
+		} else {
+			popover_show(anchor, &PODCAST_ITEMS[1], 1);
+		}
 		return;
 	}
 	trackmenu_open(lv_event_get_current_target(e));
@@ -5331,6 +5358,8 @@ void player_init(gui_config_t *cfg) {
 	// bearing and they are the reading, and at the same size the three read as
 	// one row of equals.
 	lv_obj_set_style_text_font(queue_position_label, &font_ui_18, 0);
+	lv_obj_set_style_text_align(queue_position_label, LV_TEXT_ALIGN_CENTER, 0);
+	lv_label_set_long_mode(queue_position_label, LV_LABEL_LONG_DOT);
 	lv_obj_set_align(queue_position_label, LV_ALIGN_CENTER);
 
 	// Transport: prev, play/pause, next -- with the repeat toggle parked on
@@ -5398,7 +5427,6 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_set_ext_click_area(more_btn, CORNER_BTN_EXT_CLICK);
 
 	lv_obj_t *more_icon = lv_image_create(more_btn);
-	more_btn_icon = more_icon;
 	lv_image_set_src(more_icon, &icon_ellipsis_vertical);
 	lv_obj_add_style(more_icon, &theme_style_icon, 0);
 	lv_obj_set_style_image_recolor(more_icon, lv_color_make(150, 150, 150), 0);

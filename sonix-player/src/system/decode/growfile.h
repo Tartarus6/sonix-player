@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 // Reading a file while someone else is still writing it.
 //
@@ -44,6 +45,10 @@ void growfile_finish(const char *path, bool ok);
 
 // True while that path is being written.
 bool growfile_is_growing(const char *path);
+
+// The latest download attempt for this path, or zero if none is recorded.
+// A retry gets a new ID. A finished attempt is kept until its slot is reused.
+uint64_t growfile_attempt(const char *path, bool *growing);
 
 // True if any file being written starts with `prefix`. Needed by whoever
 // sweeps the directory: deleting the file being downloaded (or its cover, or

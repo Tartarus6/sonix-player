@@ -26,13 +26,18 @@ typedef struct {
 	char title[128];
 } id3chap_t;
 
-// Reads up to `max` chapters into `out`, in the order the file lists them, and
-// returns how many the file has. `out` may be NULL (and `max` 0) to only ask
-// whether there are any -- which is what the audiobook scan does, and why that
-// case stops at the first one found.
+// Reads up to `max` chapters into `out`, in file order. Returns the number of
+// chapters found (capped at 1024), even if fewer were stored. Pass NULL and 0
+// to count chapters without storing them.
 int id3chap_read(const char *path, id3chap_t *out, int max);
 
-// True when the file has at least one. Reads no further than it has to.
+// True when the file has at least one chapter. Stops parsing at the first.
 bool id3chap_present(const char *path);
+
+// For a growing cache file: true when it has fewer than 10 bytes, or when
+// a supported ID3v2.3/v2.4 header declares an in-budget payload past EOF.
+// False for missing files, non-ID3 data, invalid headers and complete tags.
+// This tests file length, not audio completeness or unwritten sparse regions.
+bool id3chap_tag_pending(const char *path);
 
 #endif /* ID3CHAP_H */

@@ -14,6 +14,7 @@ typedef struct {
 	char current_file[512];
 	double progress_current_secs;
 	double progress_total_secs;
+	bool progress_heard_position; // false for the playhead of a paused chapter jump
 	int stream_sample_rate;
 	int stream_channels;
 
@@ -175,6 +176,8 @@ bool device_state_take_completion(void);
 audio_status_t device_state_toggle_play_pause(void);
 
 void device_state_seek(double seconds);
+// Chapter jumps must not report the destination before the decoder gets there.
+void device_state_seek_to_chapter(double seconds);
 
 // Called with the playing track's position and length, from the progress
 // poll. In the last seconds of a track, with gapless on, reads the next one

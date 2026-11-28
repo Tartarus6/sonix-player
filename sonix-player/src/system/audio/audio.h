@@ -148,7 +148,10 @@ void audio_set_completion_hook(void (*hook)(void));
 // Empty string when nothing is loaded.
 void audio_get_current_file(char *out, size_t out_size);
 
-void audio_get_progress(double *current_secs, double *total_secs);
+// False when the displayed position comes from a chapter jump while paused.
+bool audio_get_progress(double *current_secs, double *total_secs);
+// True while the selected chapter needs more audio from the stream.
+bool audio_chapter_waiting_for_download(void);
 
 // Get the sample rate and channel count of the currently playing stream.
 // Both are 0 if nothing has started playing yet.
@@ -174,6 +177,7 @@ void audio_get_stream_codec(char *out, size_t size);
 int audio_get_dsd_multiple(void);
 
 void audio_seek(double seconds);
+void audio_seek_when_ready(double seconds);
 
 // Playback speed. 1.0 is normal; anything else goes through a time stretcher,
 // so the pitch does not move -- see speed.h. Only the 16-bit path honours it,

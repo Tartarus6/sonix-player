@@ -139,12 +139,9 @@ static uint32_t remember_now_ms(void) {
 
 static bool remember_enabled(void) { return config_get_int("player", "remember_track", 0) != 0; }
 
-// A track this player must not offer to come back to: a live stream has no
-// position, and a streaming cache file will not exist at the next boot.
-static bool remember_worth_saving(const device_state_t *state) {
-	return !state->live && state->current_file[0] && !qobuzcache_owns(state->current_file) &&
-		   !tidalcache_owns(state->current_file);
-}
+// A chapter selected while paused is a playhead position, not a listening
+// position. Keep the last heard position so restore won't count it as heard.
+static bool remember_worth_saving(const device_state_t *state) { return !state->live && state->progress_heard_position && state->current_file[0] && !qobuzcache_owns(state->current_file) && !tidalcache_owns(state->current_file); }
 
 void device_state_remember_restored(const char *path, double position) {
 	snprintf(remember.file, sizeof(remember.file), "%s", path ? path : "");
@@ -231,6 +228,7 @@ void device_state_get(device_state_t *out) {
 		out->current_file[0] = '\0';
 		out->progress_current_secs = 0;
 		out->progress_total_secs = 0;
+		out->progress_heard_position = false;
 		out->stream_sample_rate = now.sample_rate;
 		out->stream_channels = now.channels;
 		snprintf(out->live_cover, sizeof(out->live_cover), "%s", now.cover_path);
@@ -257,7 +255,7 @@ void device_state_get(device_state_t *out) {
 	} else {
 		out->status = audio_get_status();
 		audio_get_current_file(out->current_file, sizeof(out->current_file));
-		audio_get_progress(&out->progress_current_secs, &out->progress_total_secs);
+		out->progress_heard_position = audio_get_progress(&out->progress_current_secs, &out->progress_total_secs);
 
 		// While a skip button is held the position shown is the one the thumb
 		// has run to, not the one the decoder is at: the seek itself happens
@@ -1625,7 +1623,7 @@ void device_state_scrub_commit(void) {
 	}
 }
 
-void device_state_seek(double seconds) {
+static void seek(double seconds, bool preview) {
 	// A seek from anywhere else -- the slider, the queue -- ends a scrub that
 	// was still open, or the interface would go on drawing a thumb that no
 	// longer means anything.
@@ -1638,8 +1636,16 @@ void device_state_seek(double seconds) {
 		history_same_listen = true;
 		load_and_play(current_metadata_file);
 	}
-	audio_seek(seconds);
+	if (preview) {
+		audio_seek(seconds);
+	} else {
+		audio_seek_when_ready(seconds);
+	}
 }
+
+void device_state_seek(double seconds) { seek(seconds, true); }
+
+void device_state_seek_to_chapter(double seconds) { seek(seconds, false); }
 
 void device_state_stop(void) { audio_stop(); }
 

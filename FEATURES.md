@@ -63,7 +63,8 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **Cover colour** - the buttons and the bar take the main colour of the cover.
 - **Cover Flow** - swipe up from the bottom edge of the Music page to flip through your albums.
 - **Queue**, **Details** (format, bitrate, length, size, ReplayGain and more) and **Show album** from the menu.
-- **Chapters** and **speed** when an audiobook or a podcast is playing.
+- **Speed** for audiobooks and podcasts.
+- **Chapters** for audiobooks and podcasts. Podcast episodes need chapters embedded in the MP3.
 
 ## Lyrics
 
