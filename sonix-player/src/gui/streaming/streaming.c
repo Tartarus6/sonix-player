@@ -4,6 +4,7 @@
 
 #include "src/gui/shell/gridpage.h"
 #include "src/gui/shell/icons.h"
+#include "src/gui/streaming/podcastnotes.h"
 #include "src/gui/streaming/podcastpage.h"
 #include "src/gui/streaming/qobuzpage.h"
 #include "src/gui/streaming/radiopage.h"
@@ -16,6 +17,7 @@ void streaming_init(gui_config_t *cfg) {
 	qobuzpage_init(cfg);
 	tidalpage_init(cfg);
 	podcastpage_init(cfg);
+	podcastnotes_init(cfg);
 
 	const grid_entry_t entries[] = {
 		{"tidal", &icon_menu_tidal, &tidal_screen, NULL},

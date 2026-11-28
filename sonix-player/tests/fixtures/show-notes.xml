@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+  <channel>
+    <title>Fixture podcast</title>
+    <item>
+      <title>First episode</title>
+      <enclosure url="https://example.test/first.mp3?x=1&amp;y=2" />
+      <content:encoded><![CDATA[<p>&nbsp;</p>]]></content:encoded>
+      <description>&lt;p&gt;Literal &amp;lt;em&amp;gt;, A &amp;amp; B.&lt;br&gt;01:23 https://example.test&lt;/p&gt;</description>
+      <itunes:summary>Wrong format.</itunes:summary>
+    </item>
+    <item>
+      <title>Second episode</title>
+      <guid> second &amp;  latest </guid>
+      <enclosure url="https://example.test/second.mp3" />
+      <content:encoded><![CDATA[<p>Hello <strong>listeners</strong>.</p><p>In this episode:</p><ul><li>News</li><li><a href="https://example.test/hidden">Guest interview</a></li></ul>]]></content:encoded>
+      <description>Short version.</description>
+    </item>
+    <item>
+      <title>Summary only</title>
+      <guid>third</guid>
+      <enclosure url="https://example.test/third.mp3" />
+      <description/>
+      <itunes:summary><![CDATA[Keep &lt;tag&gt; &amp; words.<script>if (a<2) x();</script><STYLE>.ad{display:none}</STYLE><object><p>Fallback advert</p></object><img src="hidden.jpg"><br>Next line.<strong title="unfinished]]></itunes:summary>
+    </item>
+    <item>
+      <title>No notes</title>
+      <guid>fourth</guid>
+      <enclosure url="https://example.test/fourth.mp3" />
+    </item>
+  </channel>
+</rss>

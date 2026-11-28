@@ -9,6 +9,7 @@
 #include <strings.h>
 #include <time.h>
 
+#include "podcastnotestext.h"
 #include "src/system/core/lang.h"
 #include "src/system/net/http.h"
 
@@ -124,9 +125,11 @@ static const char *next_markup(const char *p, const char *end) {
 		if (!lt) {
 			return NULL;
 		}
-		if (end - lt >= 9 && strncmp(lt, "<![CDATA[", 9) == 0) {
-			const char *stop = strstr(lt + 9, "]]>");
-			if (!stop || stop >= end) {
+		bool cdata = end - lt >= 9 && strncmp(lt, "<![CDATA[", 9) == 0;
+		bool comment = end - lt >= 4 && strncmp(lt, "<!--", 4) == 0;
+		if (cdata || comment) {
+			const char *stop = cdata ? strstr(lt + 9, "]]>") : strstr(lt + 4, "-->");
+			if (!stop || stop > end - 3) {
 				return NULL;
 			}
 			p = stop + 3;
@@ -174,9 +177,43 @@ static const char *find_end(const char *p, const char *end, const char *name) {
 	return NULL;
 }
 
-// Turns the character references and the five named entities, plus a few that
-// feeds use as if XML had them, into UTF-8, in place.
-static void decode_entities(char *s) {
+static size_t encode_reference(unsigned long code, char *out) {
+	if (code < 0x80) {
+		out[0] = (char)code;
+		return 1;
+	}
+	if (code < 0x800) {
+		out[0] = (char)(0xC0 | (code >> 6));
+		out[1] = (char)(0x80 | (code & 0x3F));
+		return 2;
+	}
+	if (code < 0x10000) {
+		out[0] = (char)(0xE0 | (code >> 12));
+		out[1] = (char)(0x80 | ((code >> 6) & 0x3F));
+		out[2] = (char)(0x80 | (code & 0x3F));
+		return 3;
+	}
+	out[0] = (char)(0xF0 | (code >> 18));
+	out[1] = (char)(0x80 | ((code >> 12) & 0x3F));
+	out[2] = (char)(0x80 | ((code >> 6) & 0x3F));
+	out[3] = (char)(0x80 | (code & 0x3F));
+	return 4;
+}
+
+static size_t decode_numeric_reference(const char *digits, const char *semi, bool xml_only, char *out) {
+	bool hex = *digits == 'x' || *digits == 'X';
+	char *stop;
+	unsigned long code = strtoul(hex ? digits + 1 : digits, &stop, hex ? 16 : 10);
+	if (code == 0 || code >= 0x110000) {
+		return 0;
+	}
+	if (xml_only && (stop != semi || (code >= 0xD800 && code <= 0xDFFF))) {
+		return 0;
+	}
+	return encode_reference(code, out);
+}
+
+static const char *named_reference(const char *name, size_t len, bool xml_only) {
 	static const struct {
 		const char *name;
 		const char *text;
@@ -186,50 +223,48 @@ static void decode_entities(char *s) {
 		{"rdquo", "\xE2\x80\x9D"}, {"ldquo", "\xE2\x80\x9C"}, {"ndash", "\xE2\x80\x93"}, {"mdash", "\xE2\x80\x94"},
 		{"hellip", "\xE2\x80\xA6"},
 	};
+	// Only the first five names belong to XML.
+	size_t count = xml_only ? 5 : sizeof(NAMED) / sizeof(NAMED[0]);
+	for (size_t i = 0; i < count; i++) {
+		if (len == strlen(NAMED[i].name) && strncmp(name, NAMED[i].name, len) == 0) {
+			return NAMED[i].text;
+		}
+	}
+	return NULL;
+}
+
+static size_t decode_reference(const char *name, const char *semi, bool xml_only, char *out) {
+	if (*name == '#') {
+		return decode_numeric_reference(name + 1, semi, xml_only, out);
+	}
+	const char *text = named_reference(name, (size_t)(semi - name), xml_only);
+	if (!text) {
+		return 0;
+	}
+	size_t len = strlen(text);
+	memcpy(out, text, len);
+	return len;
+}
+
+// Decode in place. Episode metadata accepts a few extra names used by feeds.
+static void decode_entities(char *s, bool xml_only) {
 	char *w = s;
 	for (char *r = s; *r;) {
 		if (*r != '&') {
 			*w++ = *r++;
 			continue;
 		}
-		char *semi = strchr(r, ';');
-		if (!semi || semi - r > 10) {
+		char *semi = r + 1;
+		while (semi - r <= 10 && *semi && *semi != ';') {
+			semi++;
+		}
+		if (*semi != ';' || semi - r > 10) {
 			*w++ = *r++;
 			continue;
 		}
-		bool done = false;
-		if (r[1] == '#') {
-			unsigned long code = r[2] == 'x' || r[2] == 'X' ? strtoul(r + 3, NULL, 16) : strtoul(r + 2, NULL, 10);
-			if (code > 0 && code < 0x110000) {
-				if (code < 0x80) {
-					*w++ = (char)code;
-				} else if (code < 0x800) {
-					*w++ = (char)(0xC0 | (code >> 6));
-					*w++ = (char)(0x80 | (code & 0x3F));
-				} else if (code < 0x10000) {
-					*w++ = (char)(0xE0 | (code >> 12));
-					*w++ = (char)(0x80 | ((code >> 6) & 0x3F));
-					*w++ = (char)(0x80 | (code & 0x3F));
-				} else {
-					*w++ = (char)(0xF0 | (code >> 18));
-					*w++ = (char)(0x80 | ((code >> 12) & 0x3F));
-					*w++ = (char)(0x80 | ((code >> 6) & 0x3F));
-					*w++ = (char)(0x80 | (code & 0x3F));
-				}
-				done = true;
-			}
-		} else {
-			for (size_t i = 0; i < sizeof(NAMED) / sizeof(NAMED[0]) && !done; i++) {
-				size_t n = strlen(NAMED[i].name);
-				if ((size_t)(semi - r - 1) == n && strncmp(r + 1, NAMED[i].name, n) == 0) {
-					for (const char *t = NAMED[i].text; *t;) {
-						*w++ = *t++;
-					}
-					done = true;
-				}
-			}
-		}
-		if (done) {
+		size_t decoded = decode_reference(r + 1, semi, xml_only, w);
+		if (decoded) {
+			w += decoded;
 			r = semi + 1;
 		} else {
 			*w++ = *r++;
@@ -289,7 +324,7 @@ static bool element_text(const char *tag, const char *end, const char *name, cha
 		out[used++] = *p++;
 	}
 	out[used] = '\0';
-	decode_entities(out);
+	decode_entities(out, false);
 	squeeze(out);
 	return out[0] != '\0';
 }
@@ -332,7 +367,7 @@ static bool tag_attribute(const char *tag, const char *end, const char *attr, ch
 		}
 		memcpy(out, v, len);
 		out[len] = '\0';
-		decode_entities(out);
+		decode_entities(out, false);
 		squeeze(out);
 		return out[0] != '\0';
 	}
@@ -487,6 +522,18 @@ static int by_date_cmp(const void *a, const void *b) {
 	return 0;
 }
 
+// Keep the same bounded GUID and enclosure fallback for list and notes lookups.
+static long long episode_id(const char *url, const char *item, const char *end, const char *audio) {
+	char guid[256];
+	if (!first_text(item, end, "guid", guid, sizeof(guid))) {
+		if (!audio || !audio[0]) {
+			return 0;
+		}
+		snprintf(guid, sizeof(guid), "%.*s", (int)sizeof(guid) - 1, audio);
+	}
+	return make_id(url, guid);
+}
+
 static bool parse(const char *url, const char *body, size_t len, parsed_t *out) {
 	memset(out, 0, sizeof(*out));
 	const char *end = body + len;
@@ -532,13 +579,8 @@ static bool parse(const char *url, const char *body, size_t len, parsed_t *out) 
 			snprintf(e->enclosure, sizeof(e->enclosure), "%s", audio);
 			tag_attribute(enclosure, item_end, "type", e->mime, sizeof(e->mime));
 			first_text(item, item_end, "title", e->title, sizeof(e->title));
+			e->id = episode_id(url, item, item_end, audio);
 			char text[256];
-			// The guid is what names an episode for good; the audio address
-			// stands in for a feed that gives none.
-			if (!first_text(item, item_end, "guid", text, sizeof(text))) {
-				snprintf(text, sizeof(text), "%.*s", (int)sizeof(text) - 1, audio);
-			}
-			e->id = make_id(url, text);
 			e->feed_id = feed->id;
 			snprintf(e->feed_title, sizeof(e->feed_title), "%s", feed->title);
 			if (first_text(item, item_end, "pubDate", text, sizeof(text))) {
@@ -697,4 +739,134 @@ bool podcastrss_episode(long long feed_id, long long episode_id, podcast_episode
 		podcast_set_last_error(tr("podcast_that_episode_is_gone"));
 	}
 	return found;
+}
+
+static const char *note_body(const char *item, const char *end, const char *name, const char **close) {
+	const char *tag = find_tag(item, end, name);
+	if (!tag) {
+		return NULL;
+	}
+	const char *gt = memchr(tag, '>', (size_t)(end - tag));
+	if (!gt || gt[-1] == '/') {
+		return NULL;
+	}
+	*close = find_end(gt + 1, end, name);
+	return *close ? gt + 1 : NULL;
+}
+
+// Decode XML references in ordinary text runs, never inside CDATA: its
+// HTML entities belong to the converter alone.
+static bool copy_note(const char *item, const char *end, const char *name, char *out) {
+	const char *close;
+	const char *p = note_body(item, end, name, &close);
+	if (!p) {
+		return false;
+	}
+	size_t used = 0, remaining = PODCAST_NOTES_MAX;
+	out[0] = '\0';
+	while (p < close && remaining) {
+		bool cdata = close - p >= 9 && strncmp(p, "<![CDATA[", 9) == 0;
+		const char *stop;
+		if (cdata) {
+			p += 9;
+			stop = strstr(p, "]]>");
+			if (!stop || stop > close) {
+				return false;
+			}
+		} else {
+			stop = strstr(p, "<![CDATA[");
+			if (!stop || stop > close) {
+				stop = close;
+			}
+		}
+		size_t n = (size_t)(stop - p);
+		if (n > remaining) {
+			n = remaining;
+		}
+		memcpy(out + used, p, n);
+		out[used + n] = '\0';
+		if (!cdata) {
+			decode_entities(out + used, true);
+		}
+		used += strlen(out + used);
+		remaining -= n;
+		p = cdata ? stop + 3 : stop;
+	}
+	return out[strspn(out, " \t\r\n")] != '\0';
+}
+
+static const char *find_notes_item(const char *url, const char *channel, const char *end, long long id, const char **item_end) {
+	for (const char *item = find_tag(channel, end, "item"); item;) {
+		const char *stop = find_end(item, end, "item");
+		if (!stop) {
+			return NULL;
+		}
+		const char *enclosure = find_tag(item, stop, "enclosure");
+		char audio[PODCAST_URL_MAX] = "";
+		if (enclosure) {
+			tag_attribute(enclosure, stop, "url", audio, sizeof(audio));
+		}
+		if (episode_id(url, item, stop, audio) == id) {
+			*item_end = stop;
+			return item;
+		}
+		item = find_tag(stop, end, "item");
+	}
+	return NULL;
+}
+
+static const char *const NOTE_FIELDS[] = {"content:encoded", "description", "itunes:summary"};
+#define NOTE_FIELD_COUNT (sizeof(NOTE_FIELDS) / sizeof(*NOTE_FIELDS))
+
+// Keep only the selected item's sources. A markup-only field can fall back
+// to the next one after the feed body has been freed.
+static podcast_notes_result_t read_note_sources(const char *url, const char *body, size_t len, long long id, char **raw) {
+	const char *end = body + len;
+	const char *channel = find_tag(body, end, "channel");
+	const char *item_end;
+	const char *item = find_notes_item(url, channel, end, id, &item_end);
+	if (!item) {
+		return find_end(channel, end, "channel") ? PODCAST_NOTES_UNAVAILABLE : PODCAST_NOTES_ERROR;
+	}
+	char *scratch = malloc(PODCAST_NOTES_MAX + 1);
+	if (!scratch) {
+		return PODCAST_NOTES_ERROR;
+	}
+	podcast_notes_result_t result = PODCAST_NOTES_EMPTY;
+	for (size_t i = 0; i < NOTE_FIELD_COUNT; i++) {
+		if (!copy_note(item, item_end, NOTE_FIELDS[i], scratch)) {
+			continue;
+		}
+		raw[i] = strdup(scratch);
+		if (!raw[i]) {
+			result = PODCAST_NOTES_ERROR;
+			break;
+		}
+	}
+	free(scratch);
+	return result;
+}
+
+podcast_notes_result_t podcastrss_episode_notes(long long feed_id, long long id, char **text) {
+	*text = NULL;
+	char url[PODCAST_FEED_URL_MAX];
+	if (!podcastrss_is_id(id) || !podcastrss_url_for(feed_id, url, sizeof(url))) {
+		return PODCAST_NOTES_UNAVAILABLE;
+	}
+	char *body = NULL;
+	size_t len = 0;
+	if (!http_get_ex(url, "User-Agent: " HTTP_USER_AGENT "\r\n", false, &body, &len, RSS_BODY_MAX, RSS_TIMEOUT_SECS, NULL)) {
+		free(body);
+		return PODCAST_NOTES_ERROR;
+	}
+	char *raw[NOTE_FIELD_COUNT] = {0};
+	podcast_notes_result_t result = read_note_sources(url, body, len, id, raw);
+	free(body);
+	for (size_t i = 0; i < NOTE_FIELD_COUNT; i++) {
+		if (raw[i] && result == PODCAST_NOTES_EMPTY) {
+			result = podcast_notes_to_text(raw[i], text);
+		}
+		free(raw[i]);
+	}
+	return result;
 }

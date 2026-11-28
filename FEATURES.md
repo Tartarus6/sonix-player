@@ -116,6 +116,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 - **Search** and **Trending** from the Podcast Index catalogue, or add a podcast by its feed address.
 - **Follow** up to 100 podcasts.
+- **Show notes** in the episode menu and Now Playing, as text from the podcast feed.
 - **Download** episodes to the card, one at a time or many together, and listen to them without Wi-Fi.
 - **Podcasts on the card** - your own podcasts are played too.
   > One folder per podcast inside the `Podcast` folder. Title, date and cover are read from the tags.

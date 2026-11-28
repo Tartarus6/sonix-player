@@ -26,6 +26,7 @@
 #include "src/gui/shell/theme.h"
 #include "src/gui/shell/toast.h"
 #include "src/gui/shell/topbar.h"
+#include "src/gui/streaming/podcastnotes.h"
 #include "src/system/device/power.h"
 #include "src/system/playback/sleeptimer.h"
 #include "src/system/gearboy/gearboy.h"
@@ -200,7 +201,6 @@ static lv_obj_t *cover_placeholder_icon;
 static lv_obj_t *prev_btn_obj;
 static lv_obj_t *next_btn_obj;
 static lv_obj_t *more_btn_obj;
-static lv_obj_t *more_btn_icon; // ellipsis on a track, chapters on a book
 static lv_obj_t *repeat_btn_obj;
 static lv_obj_t *speed_btn_obj;	 // stands in the repeat button's place on a book
 static lv_obj_t *speed_btn_icon;
@@ -542,14 +542,6 @@ static void apply_audiobook_mode(bool book, bool podcast) {
 									: forward == AUDIOBOOK_SKIP_LONG ? &icon_next_30
 																	 : &icon_next_10);
 	}
-	// A book has a menu of its own behind the usual glyph: chapters,
-	// bookmarks, summary. On a podcast the same button goes straight to the
-	// episodes, the only thing wanted from it, rather than to a menu whose one
-	// useful entry would always be picked.
-	if (more_btn_icon) {
-		lv_image_set_src(more_btn_icon, podcast && !book ? &icon_podcast_episodes : &icon_ellipsis_vertical);
-	}
-
 	// The star and the repeat mode are about the music library and its queue.
 	// On a book they are not merely useless: starring would write a row into
 	// the music favourites for a file the music library does not index, and
@@ -4467,8 +4459,21 @@ static void book_summary_action(void *user) {
 	audiobookextras_open_current_summary();
 }
 
-// The overflow button: the book's menu on a book, the episode queue on a
-// podcast, the track menu on anything else.
+static void podcast_queue_action(void *user) {
+	(void)user;
+	trackmenu_open_queue();
+}
+
+static void podcast_show_notes_action(void *user) {
+	(void)user;
+	device_state_t state;
+	device_state_get(&state);
+	if (!state.live && podcastcache_is_episode(state.current_file)) {
+		podcastnotes_open_path(state.current_file, true);
+	}
+}
+
+// The overflow button opens the book, podcast, or track menu.
 static void more_btn_event_cb(lv_event_t *e) {
 	if (audiobook_mode) {
 		static const popover_item_t BOOK_ITEMS[] = {
@@ -4480,10 +4485,12 @@ static void more_btn_event_cb(lv_event_t *e) {
 		popover_show(lv_event_get_current_target(e), BOOK_ITEMS, (int)(sizeof(BOOK_ITEMS) / sizeof(BOOK_ITEMS[0])));
 		return;
 	}
-	// A podcast has no chapters: it has episodes, and the episodes are already
-	// the queue. The button goes straight there.
 	if (podcast_mode) {
-		trackmenu_open_queue();
+		static const popover_item_t PODCAST_ITEMS[] = {
+			{"trackmenu_queue", podcast_queue_action, NULL},
+			{"podcast_show_notes", podcast_show_notes_action, NULL},
+		};
+		popover_show(lv_event_get_current_target(e), PODCAST_ITEMS, sizeof(PODCAST_ITEMS) / sizeof(*PODCAST_ITEMS));
 		return;
 	}
 	trackmenu_open(lv_event_get_current_target(e));
@@ -5398,7 +5405,6 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_set_ext_click_area(more_btn, CORNER_BTN_EXT_CLICK);
 
 	lv_obj_t *more_icon = lv_image_create(more_btn);
-	more_btn_icon = more_icon;
 	lv_image_set_src(more_icon, &icon_ellipsis_vertical);
 	lv_obj_add_style(more_icon, &theme_style_icon, 0);
 	lv_obj_set_style_image_recolor(more_icon, lv_color_make(150, 150, 150), 0);

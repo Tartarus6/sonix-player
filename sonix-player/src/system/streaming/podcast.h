@@ -112,6 +112,17 @@ bool podcast_episode_in_feed(long long feed_id, long long episode_id, podcast_ep
 // For podcastrss.c, which reports its failures through podcast_last_error().
 void podcast_set_last_error(const char *what);
 
+typedef enum {
+	PODCAST_NOTES_OK,
+	PODCAST_NOTES_EMPTY,
+	PODCAST_NOTES_UNAVAILABLE,
+	PODCAST_NOTES_ERROR,
+} podcast_notes_result_t;
+
+// Worker only. On success, *text is a heap-allocated plain UTF-8 string.
+// On all other results *text is NULL.
+podcast_notes_result_t podcast_episode_notes(long long feed_id, long long episode_id, char **text);
+
 // ---------------------------------------------------------------------------
 // The two skip buttons, which on podcasts are their own and not the audiobook
 // ones.
